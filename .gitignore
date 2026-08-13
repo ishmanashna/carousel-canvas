@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+dist/
+build/
+*.spec.bak
+output/
+perf_reports/
+*.log
+
+# Local fixture photos (large; tests synthesize images when missing)
+TEST IMAGES/
+
+# IDE / OS
+.cursor/
+.DS_Store
+Thumbs.db
+
+# Generated golden exports (scripts/generate_baseline_hashes.py)
+tests/fixtures/
