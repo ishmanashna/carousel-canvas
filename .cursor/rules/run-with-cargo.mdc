@@ -1,0 +1,12 @@
+---
+description: Run and test Carousel Canvas with Cargo
+alwaysApply: true
+---
+
+# Run this project with Cargo
+
+- **GUI:** from project root, `cargo run -p app` (add `--release` for faster export).
+- **CLI:** `cargo run -p app -- <folder> --strip …` (requires `--strip`).
+- **Strip carousel (`--strip`):** the default template is **`strip_mural_v2`**. Any other template (polaroid, seamless, mural v1, 10 columns) needs **`--strip-template <id>`** — see `TEMPLATE_IDS` in `crates/core/src/registry.rs` and `.cursor/rules/after-changes-strip-export.mdc` for examples.
+
+Windows: use the MSVC toolchain (`rustup default stable-msvc`). No Python venv or Pillow.

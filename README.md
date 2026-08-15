@@ -1,45 +1,41 @@
 # Carousel Canvas
 
-Template-driven Instagram carousel murals: compose one wide master image and export 10 vertical 1080x1350 JPEG slices.
+Template-driven Instagram carousel murals: compose one wide master image and export 10 vertical 1080×1350 JPEG slices.
 
 Standalone product — no dependency on the Image Stacker monolith or `image-stacker` repo.
 
 ## Requirements
 
-- Python **3.10+**
-- [Pillow](https://pypi.org/project/pillow/) (see `requirements.txt`)
-- Tkinter (included with most Python installs; needed for the GUI)
+- [Rust](https://rustup.rs/) (stable) with the **MSVC** toolchain on Windows (`rustup default stable-msvc`)
+- Windows 10+ with Direct3D 12 (integrated GPU or WARP software adapter)
 
 ## Quick start
 
 ```text
-python -m venv .venv
-
-# Windows
-.venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\python.exe run_gui.py
-
-# macOS / Linux
-source .venv/bin/activate
-pip install -r requirements.txt
-python run_gui.py
+cargo run -p app
 ```
+
+Launches the GUI. Pick a photo folder, choose a template, preview the mural, export.
 
 ### Fixture photos (optional)
 
-For local dev you can keep a `TEST IMAGES/` folder at the repo root (gitignored). Tests synthesize small JPGs when that folder is missing. The baseline-hash script (`scripts/generate_baseline_hashes.py`) expects real photos there.
+Keep a `TEST IMAGES/` folder at the repo root for local exports (gitignored). CI creates synthetic JPEGs when needed.
 
-## CLI (strip export only)
+## CLI (strip export)
 
 ```text
-python script.py "path/to/photos" --strip --output output/strip_latest --strip-layout-seed 7
+cargo run -p app -- "path/to/photos" --strip --output output/strip_latest --strip-layout-seed 7
 ```
 
-Equivalent: `python -m app.cli …`
-
-Default template is `strip_mural_v2`. Other templates need `--strip-template <id>` — see `STRIP_TEMPLATE_OPTIONS` in `app/strip/template_data.py`.
+Default template is `strip_mural_v2`. Other templates need `--strip-template <id>` — see `TEMPLATE_IDS` in `crates/core/src/registry.rs`.
 
 **Photo counts:** `strip_mural_v2` needs **35 unique** photos by default. If your folder is smaller, add `--strip-allow-repeats` (GUI: “Allow repeating photos”). `strip_10col` only needs 10.
+
+Release build (faster export):
+
+```text
+cargo run -p app --release -- "path/to/photos" --strip --output output/strip_latest
+```
 
 ## Templates
 
@@ -53,31 +49,22 @@ Default template is `strip_mural_v2`. Other templates need `--strip-template <id
 ## Tests
 
 ```text
-python -m unittest tests.test_hero_pin tests.test_layout_retry tests.test_strip -v
+cargo test -p core
+cargo test -p render --lib
+cargo test -p app
 ```
-
-The full suite takes several minutes (export smoke test runs every template).
-
-## Build (optional)
-
-```text
-pip install -r requirements-dev.txt
-.\build_windows.ps1
-```
-
-Produces `dist\CarouselCanvas.exe` via PyInstaller (`run_gui.py` entry point).
 
 ## Docs
 
-- `docs/SPEC_STRIP_MURAL_V2.md` — mural v2 layout spec
-- `docs/PERFORMANCE.md` — performance tracing
+- `docs/RUST_RESTACK_PLAN.md` — Rust rewrite plan and phase checklist
+- `docs/SPEC_STRIP_MURAL_V2.md` — mural v2 layout spec (historical)
+- `docs/PERFORMANCE.md` — performance notes from the Python era
 - `docs/archive/` — internal extraction / planning notes from the monolith split
 
 ## Logs & settings
 
-- Logs: `%LOCALAPPDATA%\CarouselCanvas\logs\app.log` (Windows) or `~/CarouselCanvas/logs/app.log` (macOS/Linux)
-- Settings: `%LOCALAPPDATA%\CarouselCanvas\settings.json` (Windows) or `~/CarouselCanvas/settings.json` (macOS/Linux)
-- Performance tracing: set `CAROUSEL_CANVAS_PERF=1` or pass `--perf` to the GUI entry point.
+- Logs: `%LOCALAPPDATA%\CarouselCanvas\logs\app.log`
+- Settings: `%LOCALAPPDATA%\CarouselCanvas\settings.json`
 
 ## License
 

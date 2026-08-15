@@ -1,21 +1,16 @@
-.venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-dist/
-build/
-*.spec.bak
+/target/
 output/
 perf_reports/
 *.log
 
-# Local fixture photos (large; tests synthesize images when missing)
+# Local fixture photos (large; optional for dev)
 TEST IMAGES/
 
+# Leftover Python envs (product is Cargo-only)
+.venv/
+venv/
+__pycache__/
+
 # IDE / OS
-.cursor/
 .DS_Store
 Thumbs.db
-
-# Generated golden exports (scripts/generate_baseline_hashes.py)
-tests/fixtures/

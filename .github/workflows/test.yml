@@ -6,14 +6,43 @@ on:
   pull_request:
 
 jobs:
-  unittest:
-    runs-on: ubuntu-latest
+  test:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run tests
-        run: python -m unittest tests.test_hero_pin tests.test_layout_retry tests.test_strip -v
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo test (core)
+        run: cargo test -p core
+
+      - name: cargo test (render lib)
+        run: cargo test -p render --lib
+
+      - name: cargo test (app)
+        run: cargo test -p app
+
+      - name: Create synthetic test images
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ci_test_images | Out-Null
+          Add-Type -AssemblyName System.Drawing
+          for ($i = 0; $i -lt 10; $i++) {
+            $bmp = New-Object System.Drawing.Bitmap 200, 200
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.Clear([System.Drawing.Color]::FromArgb(40 + $i * 20, 80 + $i * 10, 120))
+            $bmp.Save("ci_test_images/photo$i.jpg", [System.Drawing.Imaging.ImageFormat]::Jpeg)
+            $g.Dispose()
+            $bmp.Dispose()
+          }
+
+      - name: Headless strip_10col export
+        run: cargo run -p app --release -- ci_test_images --strip --strip-template strip_10col --strip-allow-repeats --output output/ci_strip
+
+      - name: Verify export artifacts
+        shell: pwsh
+        run: |
+          $slices = Get-ChildItem output/ci_strip -Filter "carousel_*_01.jpg"
+          if ($slices.Count -lt 1) { throw "missing slice JPEG" }
+          $wide = Get-ChildItem output/ci_strip -Filter "carousel_*_wide.jpg"
+          if ($wide.Count -lt 1) { throw "missing wide JPEG" }

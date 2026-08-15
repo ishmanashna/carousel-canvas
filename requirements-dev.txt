@@ -1,2 +1,0 @@
-# Dev/build only — not required to run the app from source.
-pyinstaller>=6.0

@@ -1,0 +1,53 @@
+---
+description: After code work, run a carousel strip export for visual check
+alwaysApply: true
+---
+
+# Strip export after work
+
+Before you wrap up a turn where you **changed** anything that can affect carousel strip output, run **one** strip export so the user gets fresh `*_wide.jpg` + slices to review.
+
+**When to run**
+
+- Always after edits under `crates/render/`, `crates/core/` (templates, underfill, layout), `crates/app/` (CLI/GUI export), or export behavior tied to `--strip`.
+- After other changes **only if** the user's task was explicitly about strips/carousel/mural/preview export.
+
+**When to skip**
+
+- Read-only investigation, docs-only with no strip behavior change, or the user asked not to export.
+- No usable image folder (explain briefly).
+
+**How (project root)**
+
+PowerShell: use `;` between commands, not `&&`.
+
+1. Prefer input folder: `TEST IMAGES` at repo root. Slot count varies by template (mural v2 repeats from **≥1** image; polaroid needs enough files for required slots — CLI still cycles paths). If missing, use any folder with JPG/PNG.
+2. Write to `output\strip_latest` (create if needed) so latest exports stay in one place.
+3. **Template choice (critical):** If you omit `--strip-template`, the CLI **always** uses **`strip_mural_v2`**. To verify or demo **any other** strip, you **must** pass `--strip-template <id>` on the same command line as `--strip`.
+
+   Canonical IDs (same as GUI combobox / `TEMPLATE_IDS` in `crates/core/src/registry.rs`):
+
+   - `strip_mural_v2` — default when `--strip-template` is omitted
+   - `strip_polaroid_table_v1`
+   - `strip_seamless_mosaic_v1`
+   - `strip_seamless_v1`
+   - `strip_mural_v1`
+   - `strip_10col`
+
+   **Rule of thumb:** If the user or task mentions a template by name (polaroid, seamless, 10 columns, mural v1), the export command **must** include the matching `--strip-template` id.
+
+Examples:
+
+Mural v2 (explicit default — same as omitting `--strip-template`):
+
+```text
+cargo run -p app --release -- "TEST IMAGES" --strip --strip-template strip_mural_v2 --output output/strip_latest --strip-card-edge borderless --strip-layout-seed 7
+```
+
+Polaroid table:
+
+```text
+cargo run -p app --release -- "TEST IMAGES" --strip --strip-template strip_polaroid_table_v1 --output output/strip_latest --strip-card-edge borderless --strip-layout-seed 42
+```
+
+Mention the written `carousel_*_wide.jpg` path in your summary.
