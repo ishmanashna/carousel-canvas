@@ -25,11 +25,14 @@ pub use fit::{
 };
 pub use jpeg::{encode_jpeg_uncapped, encode_slice_jpeg, CAROUSEL_SLICE_MAX_BYTES};
 pub use preview::{
-    compose_preview_gpu, prepare_preview_phase1, prepare_preview_phase2, preview_compose_scale,
-    preview_ready_without_underfill, preview_required_flatten, render_preview_gpu,
-    PreviewBuildResult, PreviewGpuReady, PreviewParams, PreviewPhase1,
+    compose_preview_gpu, prepare_preview_from_snapshot, prepare_preview_phase1,
+    prepare_preview_phase2, preview_compose_scale, preview_ready_without_underfill,
+    render_preview_gpu, PreviewBuildResult, PreviewGpuReady, PreviewParams, PreviewPhase1,
 };
-pub use strip_export::{decode_underfill_cards, run_strip_export, StripExportParams};
+pub use strip_export::{
+    create_offscreen_compositor, decode_underfill_cards, flatten_and_plan_underfill,
+    run_strip_export, StripExportParams,
+};
 
 use std::path::Path;
 use std::sync::Arc;

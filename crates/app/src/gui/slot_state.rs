@@ -1,14 +1,27 @@
 use std::path::PathBuf;
 
-use core::{max_strip_slots, SlotFill};
+use core::{max_strip_slots, SlotFill, StripSlotDef};
 
 pub const UNDO_MAX: usize = 50;
 
 #[derive(Debug, Clone)]
+struct UndoFrame {
+    assignments: Vec<Option<SlotFill>>,
+    slot_geometry: Option<Vec<StripSlotDef>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UndoRestore {
+    pub slot_geometry: Option<Vec<StripSlotDef>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct SlotState {
     pub assignments: Vec<Option<SlotFill>>,
-    undo: Vec<Vec<Option<SlotFill>>>,
-    redo: Vec<Vec<Option<SlotFill>>>,
+    undo: Vec<UndoFrame>,
+    redo: Vec<UndoFrame>,
+    /// Geometry captured on the next `checkpoint` (set by GUI when layout is locked).
+    pending_geometry: Option<Vec<StripSlotDef>>,
 }
 
 impl SlotState {
@@ -17,6 +30,7 @@ impl SlotState {
             assignments: vec![None; max_strip_slots()],
             undo: Vec::new(),
             redo: Vec::new(),
+            pending_geometry: None,
         }
     }
 
@@ -28,6 +42,11 @@ impl SlotState {
     pub fn clear_undo(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.pending_geometry = None;
+    }
+
+    pub fn set_pending_geometry(&mut self, geometry: Option<Vec<StripSlotDef>>) {
+        self.pending_geometry = geometry;
     }
 
     fn clone_assignments(&self) -> Vec<Option<SlotFill>> {
@@ -35,32 +54,50 @@ impl SlotState {
     }
 
     pub fn checkpoint(&mut self) {
-        self.undo.push(self.clone_assignments());
+        self.undo.push(UndoFrame {
+            assignments: self.clone_assignments(),
+            slot_geometry: self.pending_geometry.clone(),
+        });
         if self.undo.len() > UNDO_MAX {
             self.undo.remove(0);
         }
         self.redo.clear();
     }
 
-    pub fn undo(&mut self) -> bool {
+    pub fn undo(&mut self, current_geometry: Option<Vec<StripSlotDef>>) -> Option<UndoRestore> {
         if self.undo.is_empty() {
-            return false;
+            return None;
         }
-        self.redo.push(self.clone_assignments());
-        self.assignments = self.undo.pop().unwrap();
-        true
+        self.redo.push(UndoFrame {
+            assignments: self.clone_assignments(),
+            slot_geometry: current_geometry,
+        });
+        if self.redo.len() > UNDO_MAX {
+            self.redo.remove(0);
+        }
+        let frame = self.undo.pop().unwrap();
+        self.assignments = frame.assignments;
+        Some(UndoRestore {
+            slot_geometry: frame.slot_geometry,
+        })
     }
 
-    pub fn redo(&mut self) -> bool {
+    pub fn redo(&mut self, current_geometry: Option<Vec<StripSlotDef>>) -> Option<UndoRestore> {
         if self.redo.is_empty() {
-            return false;
+            return None;
         }
-        self.undo.push(self.clone_assignments());
+        self.undo.push(UndoFrame {
+            assignments: self.clone_assignments(),
+            slot_geometry: current_geometry,
+        });
         if self.undo.len() > UNDO_MAX {
             self.undo.remove(0);
         }
-        self.assignments = self.redo.pop().unwrap();
-        true
+        let frame = self.redo.pop().unwrap();
+        self.assignments = frame.assignments;
+        Some(UndoRestore {
+            slot_geometry: frame.slot_geometry,
+        })
     }
 
     pub fn assign(&mut self, slot: usize, path: PathBuf) {

@@ -4,9 +4,11 @@ use std::path::PathBuf;
 
 use core::{
     build_scene, build_scene_from_fills, build_scene_from_fills_with_underfill,
-    build_scene_with_underfill, carousel_tail_band_x_range, compute_bleed_px, fills_to_paths,
-    pick_best_layout_seed_with_token_retry, pick_underfill_paths, plan_and_assign_mural_underfill,
-    strip_layout_token_retry_enabled, underfill_rng_from_layout_seed, SlotFill, StripTemplate,
+    build_scene_from_snapshot, build_scene_with_underfill, carousel_tail_band_x_range,
+    compute_bleed_px, fills_to_paths, pick_best_layout_seed_with_token_retry, pick_underfill_paths,
+    plan_and_assign_mural_underfill, strip_layout_token_retry_enabled,
+    underfill_rng_from_layout_seed, LayoutSnapshot, PlannedUnderfill, Scene, SlotFill,
+    StripTemplate,
 };
 
 use crate::card_edge::prepare_render_cards;
@@ -28,6 +30,8 @@ pub struct StripExportParams {
     pub card_edge: crate::export::CardEdge,
     pub border_rgb: Option<[u8; 3]>,
     pub no_layout_retry: bool,
+    /// When set (GUI manual lock), export frozen geometry + underfill without replan.
+    pub locked_layout: Option<LayoutSnapshot>,
     pub output_dir: PathBuf,
 }
 
@@ -77,6 +81,67 @@ fn build_full_scene_with_underfill(
             underfill_paths,
         )
     }
+}
+
+/// Flatten required slots at full template resolution and plan underfill (shared by export + preview).
+pub fn flatten_and_plan_underfill(
+    compositor: &Compositor,
+    template: &StripTemplate,
+    required_scene: &Scene,
+    required_decoded: &[DecodedCard],
+    bg_rgb: [u8; 3],
+    border_rgb: [u8; 3],
+    layout_seed: i64,
+    source_paths: &[PathBuf],
+    fill_paths: &[Option<PathBuf>],
+) -> Result<PlannedUnderfill> {
+    let req_render = prepare_render_cards(
+        &required_scene.cards,
+        required_decoded,
+        crate::export::CardEdge::Borderless,
+        bg_rgb,
+        border_rgb,
+    );
+    let flat = compositor.render_required_slots_flat_rgb(
+        &req_render,
+        &required_scene.background,
+        template.canvas_width,
+        template.canvas_height,
+    )?;
+    let cw = template.canvas_width as u32;
+    let ch = template.canvas_height as u32;
+    let tol = template.gap_fill_beige_tolerance.max(12);
+    let n_uf = template.background_underfill_count() as usize;
+    let mut uf_rng = underfill_rng_from_layout_seed(layout_seed);
+    let uf_pool = pick_underfill_paths(source_paths, fill_paths, n_uf, &mut uf_rng);
+    let (tail_x0, tail_x1) = carousel_tail_band_x_range(
+        template.canvas_width,
+        template.slice_width,
+        template.slice_count as i32,
+        template.overlap_px,
+        template.background_tail_slice_count,
+    );
+    let tail_tol_bonus = if template.background_tail_slice_count <= 1 {
+        52
+    } else {
+        42
+    };
+    Ok(plan_and_assign_mural_underfill(
+        &flat,
+        cw,
+        ch,
+        bg_rgb,
+        tol,
+        layout_seed,
+        template.background_underfill_layers,
+        template.background_underfill_boost_layers,
+        template.background_underfill_repeat_layers,
+        template.background_tail_underfill_layers,
+        tail_x0,
+        tail_x1,
+        tail_tol_bonus,
+        &uf_pool,
+    ))
 }
 
 pub fn decode_underfill_cards(
@@ -152,10 +217,51 @@ fn procedural_background_for_template(
     })
 }
 
+fn run_locked_pipeline_on_gpu(
+    compositor: &Compositor,
+    params: &StripExportParams,
+    snapshot: &LayoutSnapshot,
+) -> Result<ExportResult> {
+    let template = &params.template;
+    let bg_rgb = parse_color_rgb(template.background);
+    let border_rgb = params.border_rgb.unwrap_or(bg_rgb);
+    let card_edge =
+        crate::export::CardEdge::parse(&snapshot.card_edge).unwrap_or(params.card_edge);
+    let fills = params
+        .slot_fills
+        .as_ref()
+        .ok_or_else(|| DecodeError::Encode("locked export requires slot_fills".into()))?;
+    eprintln!("export: locked layout (seed={})", snapshot.layout_seed);
+    let scene = build_scene_from_snapshot(snapshot, fills, 1.0);
+    let background_rgb =
+        procedural_background_for_template(template, snapshot.layout_seed);
+    let cache = DecodeCache::new();
+    eprintln!("export: decoding {} cards…", scene.cards.len());
+    let decoded = decode_scene_cards(&scene, &cache)?;
+    let bleed_px = compute_bleed_px(&scene, &snapshot.underfill_boxes);
+    eprintln!("export: rendering tiles (bleed={bleed_px})…");
+    export_scene_tiles(
+        compositor,
+        &scene,
+        &decoded,
+        background_rgb.as_ref(),
+        template,
+        &params.output_dir,
+        &ExportOptions {
+            card_edge,
+            bleed_px,
+            border_rgb,
+        },
+    )
+}
+
 fn run_pipeline_on_gpu(
     compositor: &Compositor,
     params: &StripExportParams,
 ) -> Result<ExportResult> {
+    if let Some(ref snapshot) = params.locked_layout {
+        return run_locked_pipeline_on_gpu(compositor, params, snapshot);
+    }
     let template = &params.template;
     let bg_rgb = parse_color_rgb(template.background);
     let border_rgb = params.border_rgb.unwrap_or(bg_rgb);
@@ -178,59 +284,19 @@ fn run_pipeline_on_gpu(
 
     if underfill_enabled {
         eprintln!("export: required-slot flatten for underfill…");
-        let req_render = prepare_render_cards(
-            &required_scene.cards,
+        let n_uf = template.background_underfill_count() as usize;
+        eprintln!("export: planning underfill ({n_uf} pool)…");
+        let planned = flatten_and_plan_underfill(
+            compositor,
+            template,
+            &required_scene,
             &required_decoded,
-            crate::export::CardEdge::Borderless,
             bg_rgb,
             border_rgb,
-        );
-        let flat = compositor.render_required_slots_flat_rgb(
-            &req_render,
-            &required_scene.background,
-            template.canvas_width,
-            template.canvas_height,
-        )?;
-        let cw = template.canvas_width as u32;
-        let ch = template.canvas_height as u32;
-        let tol = template.gap_fill_beige_tolerance.max(12);
-        let n_uf = template.background_underfill_count() as usize;
-        let mut uf_rng = underfill_rng_from_layout_seed(eff_seed);
-        let uf_pool = pick_underfill_paths(
+            eff_seed,
             &params.source_paths,
             &fill_paths_for_underfill(params),
-            n_uf,
-            &mut uf_rng,
-        );
-        let (tail_x0, tail_x1) = carousel_tail_band_x_range(
-            template.canvas_width,
-            template.slice_width,
-            template.slice_count as i32,
-            template.overlap_px,
-            template.background_tail_slice_count,
-        );
-        let tail_tol_bonus = if template.background_tail_slice_count <= 1 {
-            52
-        } else {
-            42
-        };
-        eprintln!("export: planning underfill ({n_uf} pool)…");
-        let planned = plan_and_assign_mural_underfill(
-            &flat,
-            cw,
-            ch,
-            bg_rgb,
-            tol,
-            eff_seed,
-            template.background_underfill_layers,
-            template.background_underfill_boost_layers,
-            template.background_underfill_repeat_layers,
-            template.background_tail_underfill_layers,
-            tail_x0,
-            tail_x1,
-            tail_tol_bonus,
-            &uf_pool,
-        );
+        )?;
         eprintln!(
             "export: decoding {} underfill cards…",
             planned.boxes.len()
@@ -299,7 +365,8 @@ fn dx12_adapter_selector(
         .ok_or_else(|| "no DX12 or WARP adapter".to_string())
 }
 
-fn create_offscreen_compositor() -> Result<Compositor> {
+/// Offscreen DX12 compositor for export and preview underfill flatten (not tied to eframe).
+pub fn create_offscreen_compositor() -> Result<Compositor> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::DX12,
         ..Default::default()
@@ -359,6 +426,7 @@ mod tests {
             card_edge: crate::export::CardEdge::Borderless,
             border_rgb: None,
             no_layout_retry: false,
+            locked_layout: None,
             output_dir: PathBuf::from("output"),
         };
         let bg = parse_color_rgb("#ece8e3");

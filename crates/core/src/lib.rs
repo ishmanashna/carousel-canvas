@@ -38,8 +38,8 @@ pub use python_rng::PythonRandom;
 pub use registry::{default_template, get_template_by_id, max_strip_slots, TEMPLATE_IDS};
 pub use scene::{build_scene, build_scene_with_underfill, compute_bleed_px, Rect, Scene, SceneCard};
 pub use slot_fill::{
-    build_scene_from_fills, build_scene_from_fills_with_underfill, fills_to_paths, scale_rect,
-    scale_underfill_box, SlotFill,
+    build_scene_from_fills, build_scene_from_fills_with_underfill, build_scene_from_snapshot,
+    fills_to_paths, scale_rect, scale_underfill_box, LayoutSnapshot, SlotFill,
 };
 pub use slot::{Fit, StripSlotDef};
 pub use template::{LayoutPlacer, StripTemplate};

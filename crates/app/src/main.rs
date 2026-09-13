@@ -144,6 +144,7 @@ fn run_strip_export_cli(cli: &Cli, folder: &Path) -> Result<(), String> {
         card_edge,
         border_rgb,
         no_layout_retry: cli.strip_no_layout_retry,
+        locked_layout: None,
         output_dir: cli.output.clone(),
     };
 

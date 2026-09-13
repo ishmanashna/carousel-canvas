@@ -1,14 +1,14 @@
 //! GPU preview compose at reduced scale (GUI mural strip).
 //!
 //! CPU work (decode / underfill plan) is separable from wgpu so the GUI can keep
-//! decode on workers and uploads/draws on the main thread.
+//! decode on workers and uploads/draws on the main thread. Underfill planning uses
+//! full template resolution on an offscreen worker GPU (same as CLI export).
 
 use std::path::PathBuf;
 
 use core::{
-    build_scene_from_fills, build_scene_from_fills_with_underfill, carousel_tail_band_x_range,
-    pick_underfill_paths, plan_and_assign_mural_underfill, Scene, SlotFill, StripSlotDef,
-    StripTemplate,
+    build_scene_from_fills, build_scene_from_fills_with_underfill, build_scene_from_snapshot,
+    fills_to_paths, LayoutSnapshot, Scene, SlotFill, StripSlotDef, StripTemplate, UnderfillBox,
 };
 use image::RgbImage;
 
@@ -18,11 +18,11 @@ use crate::compositor::Compositor;
 use crate::decode_scene_cards;
 use crate::export::CardEdge;
 use crate::error::Result;
-use crate::strip_export::decode_underfill_cards;
+use crate::strip_export::{create_offscreen_compositor, flatten_and_plan_underfill};
 use crate::DecodeCache;
 use crate::DecodedCard;
 
-pub const PREVIEW_MAX_COMPOSE_WIDTH: f64 = 4000.0;
+pub const PREVIEW_MAX_COMPOSE_WIDTH: f64 = 2200.0;
 
 #[derive(Debug, Clone)]
 pub struct PreviewBuildResult {
@@ -30,6 +30,9 @@ pub struct PreviewBuildResult {
     pub overlay_slots: Vec<StripSlotDef>,
     pub canvas_width: i32,
     pub canvas_height: i32,
+    /// Full template-space underfill boxes (for Phase 3 snapshot).
+    pub underfill_boxes: Vec<UnderfillBox>,
+    pub underfill_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +43,8 @@ pub struct PreviewParams {
     pub layout_seed: i64,
     pub card_edge: CardEdge,
     pub border_rgb: Option<[u8; 3]>,
+    /// When false, skip beige underfill for a faster interactive preview.
+    pub include_underfill: bool,
 }
 
 /// CPU phase 1: required-slot scene + decoded textures (no wgpu).
@@ -47,6 +52,7 @@ pub struct PreviewParams {
 pub struct PreviewPhase1 {
     pub params: PreviewParams,
     pub compose_scale: f64,
+    /// Required slots at full template resolution when underfill is enabled, else compose scale.
     pub required_scene: Scene,
     pub required_decoded: Vec<DecodedCard>,
     pub overlay_slots: Vec<StripSlotDef>,
@@ -66,6 +72,8 @@ pub struct PreviewGpuReady {
     pub border_rgb: [u8; 3],
     pub card_edge: CardEdge,
     pub background_rgb: Option<RgbImage>,
+    pub underfill_boxes: Vec<UnderfillBox>,
+    pub underfill_paths: Vec<PathBuf>,
 }
 
 pub fn preview_compose_scale(template: &StripTemplate) -> f64 {
@@ -94,12 +102,16 @@ pub fn prepare_preview_phase1(params: PreviewParams) -> Result<PreviewPhase1> {
     let background_rgb =
         procedural_background_for_template(&params.template, params.layout_seed, compose_scale);
 
+    let underfill_enabled = params.include_underfill
+        && params.card_edge == CardEdge::Borderless
+        && params.template.background_underfill_count() > 0;
+
+    // Full-res decode for underfill flatten/plan; scaled decode for display-only path.
+    let scene_scale = if underfill_enabled { 1.0 } else { compose_scale };
     let (required_scene, overlay_slots) =
-        build_scene_from_fills(&params.template, &params.fills, layout_seed, compose_scale);
+        build_scene_from_fills(&params.template, &params.fills, layout_seed, scene_scale);
     let cache = DecodeCache::new();
     let required_decoded = decode_scene_cards(&required_scene, &cache)?;
-    let underfill_enabled = params.card_edge == CardEdge::Borderless
-        && params.template.background_underfill_count() > 0;
 
     Ok(PreviewPhase1 {
         params,
@@ -114,76 +126,22 @@ pub fn prepare_preview_phase1(params: PreviewParams) -> Result<PreviewPhase1> {
     })
 }
 
-/// Main-thread: required-slot flatten for underfill planning.
-pub fn preview_required_flatten(
-    compositor: &Compositor,
-    phase1: &PreviewPhase1,
-) -> Result<Vec<u8>> {
-    let req_render = prepare_render_cards(
-        &phase1.required_scene.cards,
-        &phase1.required_decoded,
-        CardEdge::Borderless,
-        phase1.bg_rgb,
-        phase1.border_rgb,
-    );
-    compositor.render_required_slots_flat_rgb(
-        &req_render,
-        &phase1.required_scene.background,
-        phase1.required_scene.canvas_width,
-        phase1.required_scene.canvas_height,
-    )
-}
-
-/// Worker: plan underfill + decode boxes (needs flatten from main).
-pub fn prepare_preview_phase2(
-    phase1: PreviewPhase1,
-    flat: Vec<u8>,
-) -> Result<PreviewGpuReady> {
+/// Worker: offscreen full-res flatten, plan underfill, decode display scene at compose scale.
+pub fn prepare_preview_phase2(phase1: PreviewPhase1) -> Result<PreviewGpuReady> {
     let params = &phase1.params;
     let layout_seed = Some(params.layout_seed);
-    let cache = DecodeCache::new();
-    let cw = phase1.required_scene.canvas_width as u32;
-    let ch = phase1.required_scene.canvas_height as u32;
-    let tol = params.template.gap_fill_beige_tolerance.max(12);
-    let n_uf = params.template.background_underfill_count() as usize;
-    let mut uf_rng = core::underfill_rng_from_layout_seed(params.layout_seed);
-    let uf_pool = pick_underfill_paths(
-        &params.source_paths,
-        &core::fills_to_paths(&params.fills),
-        n_uf,
-        &mut uf_rng,
-    );
-    let (tail_x0, tail_x1) = carousel_tail_band_x_range(
-        params.template.canvas_width,
-        params.template.slice_width,
-        params.template.slice_count as i32,
-        params.template.overlap_px,
-        params.template.background_tail_slice_count,
-    );
-    let tail_tol_bonus = if params.template.background_tail_slice_count <= 1 {
-        52
-    } else {
-        42
-    };
-    let scaled_tail_x0 = (tail_x0 as f64 * phase1.compose_scale).round() as i32;
-    let scaled_tail_x1 = (tail_x1 as f64 * phase1.compose_scale).round() as i32;
-    let planned = plan_and_assign_mural_underfill(
-        &flat,
-        cw,
-        ch,
+    let compositor = create_offscreen_compositor()?;
+    let planned = flatten_and_plan_underfill(
+        &compositor,
+        &params.template,
+        &phase1.required_scene,
+        &phase1.required_decoded,
         phase1.bg_rgb,
-        tol,
+        phase1.border_rgb,
         params.layout_seed,
-        params.template.background_underfill_layers,
-        params.template.background_underfill_boost_layers,
-        params.template.background_underfill_repeat_layers,
-        params.template.background_tail_underfill_layers,
-        scaled_tail_x0,
-        scaled_tail_x1,
-        tail_tol_bonus,
-        &uf_pool,
-    );
-    let uf_decoded = decode_underfill_cards(&planned.boxes, &planned.paths, &cache)?;
+        &params.source_paths,
+        &fills_to_paths(&params.fills),
+    )?;
     let scene = build_scene_from_fills_with_underfill(
         &params.template,
         &params.fills,
@@ -191,24 +149,20 @@ pub fn prepare_preview_phase2(
         phase1.compose_scale,
         &planned.boxes,
         &planned.paths,
-        1.0,
+        phase1.compose_scale,
     );
-    let mut all = uf_decoded;
-    let uf_len = all.len();
-    for card in phase1.required_decoded {
-        all.push(DecodedCard {
-            index: uf_len + card.index,
-            image: card.image,
-        });
-    }
+    let cache = DecodeCache::new();
+    let decoded = decode_scene_cards(&scene, &cache)?;
     Ok(PreviewGpuReady {
         scene,
-        decoded: all,
+        decoded,
         overlay_slots: phase1.overlay_slots,
         bg_rgb: phase1.bg_rgb,
         border_rgb: phase1.border_rgb,
         card_edge: params.card_edge,
         background_rgb: phase1.background_rgb,
+        underfill_boxes: planned.boxes,
+        underfill_paths: planned.paths,
     })
 }
 
@@ -222,7 +176,40 @@ pub fn preview_ready_without_underfill(phase1: PreviewPhase1) -> PreviewGpuReady
         border_rgb: phase1.border_rgb,
         card_edge: phase1.params.card_edge,
         background_rgb: phase1.background_rgb,
+        underfill_boxes: Vec::new(),
+        underfill_paths: Vec::new(),
     }
+}
+
+/// Manual / locked preview: recompose from snapshot only (no underfill replan).
+pub fn prepare_preview_from_snapshot(
+    snapshot: LayoutSnapshot,
+    fills: Vec<Option<SlotFill>>,
+    border_rgb: Option<[u8; 3]>,
+) -> Result<PreviewGpuReady> {
+    let compose_scale = preview_compose_scale(&snapshot.template);
+    let card_edge = CardEdge::parse(&snapshot.card_edge).unwrap_or(CardEdge::Borderless);
+    let bg_rgb = parse_color_rgb(snapshot.template.background);
+    let border_rgb = border_rgb.unwrap_or(bg_rgb);
+    let background_rgb = procedural_background_for_template(
+        &snapshot.template,
+        snapshot.layout_seed,
+        compose_scale,
+    );
+    let scene = build_scene_from_snapshot(&snapshot, &fills, compose_scale);
+    let cache = DecodeCache::new();
+    let decoded = decode_scene_cards(&scene, &cache)?;
+    Ok(PreviewGpuReady {
+        scene,
+        decoded,
+        overlay_slots: snapshot.slots.clone(),
+        bg_rgb,
+        border_rgb,
+        card_edge,
+        background_rgb,
+        underfill_boxes: snapshot.underfill_boxes.clone(),
+        underfill_paths: snapshot.underfill_paths.clone(),
+    })
 }
 
 /// Main-thread: upload + draw + readback.
@@ -250,6 +237,8 @@ pub fn compose_preview_gpu(
         overlay_slots: ready.overlay_slots.clone(),
         canvas_width: ready.scene.canvas_width,
         canvas_height: ready.scene.canvas_height,
+        underfill_boxes: ready.underfill_boxes.clone(),
+        underfill_paths: ready.underfill_paths.clone(),
     })
 }
 
@@ -260,8 +249,7 @@ pub fn render_preview_gpu(
 ) -> Result<PreviewBuildResult> {
     let phase1 = prepare_preview_phase1(params.clone())?;
     let ready = if phase1.underfill_enabled {
-        let flat = preview_required_flatten(compositor, &phase1)?;
-        prepare_preview_phase2(phase1, flat)?
+        prepare_preview_phase2(phase1)?
     } else {
         preview_ready_without_underfill(phase1)
     };
@@ -280,4 +268,3 @@ mod tests {
         assert!((tpl.canvas_width as f64 * s).round() <= PREVIEW_MAX_COMPOSE_WIDTH);
     }
 }
-
