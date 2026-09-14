@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 core = { path = "../core" }
 render = { path = "../render" }
+vision = { path = "../vision" }
 clap = { version = "4", features = ["derive"] }
 eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts"] }
 egui-wgpu = "0.31"

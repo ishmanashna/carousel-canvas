@@ -2,8 +2,21 @@ use std::path::PathBuf;
 
 use crate::polaroid_card::polaroid_slot_seed;
 use crate::slot::{Fit, StripSlotDef};
-use crate::template::StripTemplate;
+use crate::template::{LayoutPlacer, StripTemplate};
 use crate::underfill::UnderfillBox;
+
+const OOF_PAPER_EDGE_FEATHER_PX: u32 = 56;
+
+pub(crate) fn oof_card_style(is_oof: bool, cutout: bool) -> (bool, u32) {
+    (
+        is_oof && cutout,
+        if is_oof && !cutout {
+            OOF_PAPER_EDGE_FEATHER_PX
+        } else {
+            0
+        },
+    )
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rect {
@@ -50,6 +63,14 @@ pub struct SceneCard {
     pub cover_height_first: bool,
     pub polaroid: bool,
     pub slot_seed: u32,
+    pub cutout: bool,
+    pub mask_path: Option<PathBuf>,
+    /// Oriented-source crop `[x, y, w, h]` for cutout figures.
+    pub source_crop: Option<[i32; 4]>,
+    /// Drop-shadow pass before the card (cutout figures only for out-of-frame).
+    pub cast_shadow: bool,
+    /// Soften paper rectangle edges so overlaps mix instead of hard seams + shadows.
+    pub edge_feather_px: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +109,61 @@ pub fn build_scene(
                 cover_height_first: slot.cover_height_first,
                 polaroid: slot.polaroid,
                 slot_seed: polaroid_slot_seed(eff_seed, i),
+                cutout: slot.cutout,
+                mask_path: slot.mask_path.clone(),
+                source_crop: slot.source_crop,
+                cast_shadow: false,
+                edge_feather_px: 0,
+            });
+        }
+    }
+    cards.sort_by_key(|c| c.z);
+    Scene {
+        background: template.background.to_string(),
+        canvas_width: template.canvas_width,
+        canvas_height: template.canvas_height,
+        cards,
+    }
+}
+
+/// Build scene from pre-resolved slots (out-of-frame). Does not call `resolved_slots`.
+pub fn build_scene_from_resolved(
+    template: &StripTemplate,
+    slots: &[StripSlotDef],
+    fills: &[Option<PathBuf>],
+    fill_required: &[bool],
+    layout_seed: Option<i64>,
+) -> Scene {
+    let eff_seed = layout_seed.unwrap_or(0);
+    let mut cards = Vec::new();
+    for (i, slot) in slots.iter().enumerate() {
+        if i >= fill_required.len() || !fill_required[i] {
+            continue;
+        }
+        if let Some(path) = fills.get(i).and_then(|f| f.as_ref()) {
+            let (cast_shadow, edge_feather_px) = oof_card_style(
+                template.layout_placer == LayoutPlacer::OutOfFrame,
+                slot.cutout,
+            );
+            cards.push(SceneCard {
+                photo_path: path.clone(),
+                dest: Rect::from(slot),
+                z: slot.z_index,
+                rotation_deg: slot.rotation_deg,
+                fit: slot.fit,
+                pan_x: 0.0,
+                pan_y: 0.0,
+                flip_h: false,
+                source_trim_left_frac: slot.source_trim_left_frac,
+                horizontal_center_band_frac: slot.horizontal_center_band_frac,
+                cover_height_first: slot.cover_height_first,
+                polaroid: slot.polaroid,
+                slot_seed: polaroid_slot_seed(eff_seed, i),
+                cutout: slot.cutout,
+                mask_path: slot.mask_path.clone(),
+                source_crop: slot.source_crop,
+                cast_shadow,
+                edge_feather_px,
             });
         }
     }
@@ -129,6 +205,11 @@ pub fn build_scene_with_underfill(
             cover_height_first: false,
             polaroid: false,
             slot_seed: 0,
+            cutout: false,
+            mask_path: None,
+            source_crop: None,
+            cast_shadow: false,
+            edge_feather_px: 0,
         });
     }
     underfill_cards.sort_by_key(|c| c.z);

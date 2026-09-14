@@ -4,11 +4,15 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
+use std::sync::atomic::AtomicBool;
+
 use core::{
-    get_template_by_id, pin_strip_hero_fill, pick_dumb_fills, pick_smart_fills,
-    resolve_strip_hero_argument, scan_image_folder, validate_strip_unique_sources, PythonRandom,
-    TEMPLATE_IDS,
+    flagship_slot_index, get_template_by_id, pin_strip_hero_fill_at, pick_dumb_fills,
+    pick_out_of_frame_fills, pick_smart_fills, resolve_out_of_frame_slots,
+    resolve_strip_hero_argument, scan_image_folder, validate_strip_unique_sources, LayoutPlacer,
+    PythonRandom, TEMPLATE_IDS,
 };
+use vision::analyze_folder;
 use render::{parse_color_rgb, run_strip_export, CardEdge, StripExportParams};
 
 #[derive(Parser, Debug)]
@@ -106,18 +110,56 @@ fn run_strip_export_cli(cli: &Cli, folder: &Path) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     let seed = assign_seed();
-    let mut fills = if cli.strip_dumb_shuffle {
-        pick_dumb_fills(&paths, &template, Some(layout_seed), seed).map_err(|e| e.to_string())?
+    let out_of_frame = template.layout_placer == LayoutPlacer::OutOfFrame;
+
+    let (mut fills, resolved_slots, fill_required, flagship_idx) = if out_of_frame {
+        eprintln!("Analyzing {} photos for out-of-frame…", paths.len());
+        let cancel = AtomicBool::new(false);
+        let analyses = analyze_folder(&paths, &cancel, |done, total| {
+            eprintln!("Reading photos {done}/{total}");
+        })
+        .map_err(|e| e.to_string())?;
+        let slots = resolve_out_of_frame_slots(
+            &analyses,
+            template.canvas_width,
+            template.canvas_height,
+            template.slice_width,
+            layout_seed,
+        );
+        if slots.is_empty() {
+            return Err(
+                "Out-of-frame placement produced no slots (need at least one usable photo).".into(),
+            );
+        }
+        let fill_required = vec![true; slots.len()];
+        let flagship_idx = flagship_slot_index(&slots);
+        let fills =
+            pick_out_of_frame_fills(&analyses, &slots, seed).map_err(|e| e.to_string())?;
+        eprintln!(
+            "Placed {} slots ({} papers, {} figures)",
+            slots.len(),
+            slots.iter().filter(|s| !s.cutout).count(),
+            slots.iter().filter(|s| s.cutout).count()
+        );
+        (fills, Some(slots), Some(fill_required), flagship_idx)
     } else {
-        pick_smart_fills(&paths, &template, Some(layout_seed), seed).map_err(|e| e.to_string())?
+        let fills = if cli.strip_dumb_shuffle {
+            pick_dumb_fills(&paths, &template, Some(layout_seed), seed)
+                .map_err(|e| e.to_string())?
+        } else {
+            pick_smart_fills(&paths, &template, Some(layout_seed), seed)
+                .map_err(|e| e.to_string())?
+        };
+        (fills, None, None, template.layout_flagship_slot_index)
     };
 
     if let Some(ref hero_spec) = cli.strip_hero_image {
         let hero_path = resolve_strip_hero_argument(folder, hero_spec).map_err(|e| e.to_string())?;
         let mut rng = PythonRandom::new(seed.wrapping_add(1));
-        pin_strip_hero_fill(
+        pin_strip_hero_fill_at(
             &mut fills,
             &template,
+            flagship_idx,
             &hero_path,
             Some(layout_seed),
             &paths,
@@ -128,7 +170,11 @@ fn run_strip_export_cli(cli: &Cli, folder: &Path) -> Result<(), String> {
         eprintln!("Pinned hero image: {}", hero_path.display());
     }
 
-    let card_edge = CardEdge::parse(&cli.strip_card_edge).map_err(|e| e.to_string())?;
+    let card_edge = if out_of_frame {
+        CardEdge::Borderless
+    } else {
+        CardEdge::parse(&cli.strip_card_edge).map_err(|e| e.to_string())?
+    };
     let border_rgb = if card_edge == CardEdge::Border {
         Some(parse_color_rgb(&cli.color))
     } else {
@@ -143,8 +189,10 @@ fn run_strip_export_cli(cli: &Cli, folder: &Path) -> Result<(), String> {
         layout_seed,
         card_edge,
         border_rgb,
-        no_layout_retry: cli.strip_no_layout_retry,
+        no_layout_retry: cli.strip_no_layout_retry || out_of_frame,
         locked_layout: None,
+        resolved_slots,
+        fill_required,
         output_dir: cli.output.clone(),
     };
 

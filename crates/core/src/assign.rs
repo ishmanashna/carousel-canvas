@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use crate::analysis::PhotoAnalysis;
 use crate::error::{CoreError, Result};
 use crate::python_rng::PythonRandom;
 use crate::slot::StripSlotDef;
-use crate::template::StripTemplate;
+use crate::template::{LayoutPlacer, StripTemplate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AspectClass {
@@ -402,6 +403,20 @@ pub fn validate_strip_unique_sources(
     allow_repeats: bool,
     layout_seed: Option<i64>,
 ) -> Result<()> {
+    if template.layout_placer == LayoutPlacer::OutOfFrame {
+        if source_paths.is_empty() {
+            return Err(CoreError::NeedAtLeastOneImage);
+        }
+        return Ok(());
+    }
     let need = template.strip_image_slot_count(layout_seed);
     crate::io::validate_unique_sources(need, source_paths, allow_repeats, template.id)
+}
+
+pub fn pick_out_of_frame_fills(
+    analyses: &[PhotoAnalysis],
+    slots: &[StripSlotDef],
+    seed: u32,
+) -> Result<Vec<Option<PathBuf>>> {
+    crate::layout_out_of_frame::pick_out_of_frame_fills(analyses, slots, seed)
 }

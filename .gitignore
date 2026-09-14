@@ -1,7 +1,15 @@
 /target/
+/target_*/
 output/
+.superpowers/
+target_ext.rs
 perf_reports/
 *.log
+
+# Local model weights (runtime uses %LOCALAPPDATA%/CarouselCanvas/)
+*.onnx
+models/
+masks/
 
 # Local fixture photos (large; optional for dev)
 TEST IMAGES/

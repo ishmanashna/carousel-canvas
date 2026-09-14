@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use core::{
     build_scene, build_scene_from_fills, build_scene_from_fills_with_underfill,
-    build_scene_from_snapshot, build_scene_with_underfill, carousel_tail_band_x_range,
+    build_scene_from_resolved, build_scene_from_snapshot, build_scene_with_underfill,
+    carousel_tail_band_x_range,
     compute_bleed_px, fills_to_paths, pick_best_layout_seed_with_token_retry, pick_underfill_paths,
     plan_and_assign_mural_underfill, strip_layout_token_retry_enabled,
     underfill_rng_from_layout_seed, LayoutSnapshot, PlannedUnderfill, Scene, SlotFill,
@@ -32,6 +33,9 @@ pub struct StripExportParams {
     pub no_layout_retry: bool,
     /// When set (GUI manual lock), export frozen geometry + underfill without replan.
     pub locked_layout: Option<LayoutSnapshot>,
+    /// Pre-resolved slots for out-of-frame (skips `template.resolved_slots`).
+    pub resolved_slots: Option<Vec<core::StripSlotDef>>,
+    pub fill_required: Option<Vec<bool>>,
     pub output_dir: PathBuf,
 }
 
@@ -48,6 +52,9 @@ fn build_required_scene(
     params: &StripExportParams,
     layout_seed: Option<i64>,
 ) -> core::Scene {
+    if let (Some(slots), Some(req)) = (&params.resolved_slots, &params.fill_required) {
+        return build_scene_from_resolved(template, slots, &params.fills, req, layout_seed);
+    }
     if let Some(ref sf) = params.slot_fills {
         build_scene_from_fills(template, sf, layout_seed, 1.0).0
     } else {
@@ -427,6 +434,8 @@ mod tests {
             border_rgb: None,
             no_layout_retry: false,
             locked_layout: None,
+            resolved_slots: None,
+            fill_required: None,
             output_dir: PathBuf::from("output"),
         };
         let bg = parse_color_rgb("#ece8e3");

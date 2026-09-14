@@ -4,6 +4,8 @@ pub enum Fit {
     Contain,
 }
 
+use std::path::PathBuf;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StripSlotDef {
     pub x: i32,
@@ -19,6 +21,10 @@ pub struct StripSlotDef {
     pub horizontal_center_band_frac: Option<f64>,
     pub source_trim_left_frac: Option<f64>,
     pub cover_height_first: bool,
+    pub cutout: bool,
+    pub mask_path: Option<PathBuf>,
+    /// Oriented-source crop `[x, y, w, h]` so cutouts Cover the subject, not the full frame.
+    pub source_crop: Option<[i32; 4]>,
 }
 
 impl StripSlotDef {
@@ -37,7 +43,15 @@ impl StripSlotDef {
             horizontal_center_band_frac: None,
             source_trim_left_frac: None,
             cover_height_first: false,
+            cutout: false,
+            mask_path: None,
+            source_crop: None,
         }
+    }
+
+    pub fn with_source_crop(mut self, crop: [i32; 4]) -> Self {
+        self.source_crop = Some(crop);
+        self
     }
 
     pub fn with_rotation(mut self, deg: f64) -> Self {
@@ -77,6 +91,16 @@ impl StripSlotDef {
 
     pub fn with_cover_height_first(mut self) -> Self {
         self.cover_height_first = true;
+        self
+    }
+
+    pub fn with_cutout(mut self) -> Self {
+        self.cutout = true;
+        self
+    }
+
+    pub fn with_mask_path(mut self, path: PathBuf) -> Self {
+        self.mask_path = Some(path);
         self
     }
 

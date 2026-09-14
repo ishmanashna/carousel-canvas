@@ -7,8 +7,9 @@
 use std::path::PathBuf;
 
 use core::{
-    build_scene_from_fills, build_scene_from_fills_with_underfill, build_scene_from_snapshot,
-    fills_to_paths, LayoutSnapshot, Scene, SlotFill, StripSlotDef, StripTemplate, UnderfillBox,
+    build_scene_from_fills, build_scene_from_fills_with_underfill, build_scene_from_resolved,
+    build_scene_from_snapshot, fills_to_paths, LayoutSnapshot, Scene, SlotFill, StripSlotDef,
+    StripTemplate, UnderfillBox,
 };
 use image::RgbImage;
 
@@ -45,6 +46,9 @@ pub struct PreviewParams {
     pub border_rgb: Option<[u8; 3]>,
     /// When false, skip beige underfill for a faster interactive preview.
     pub include_underfill: bool,
+    /// Pre-resolved slots for out-of-frame (skips `template.resolved_slots`).
+    pub resolved_slots: Option<Vec<StripSlotDef>>,
+    pub fill_required: Option<Vec<bool>>,
 }
 
 /// CPU phase 1: required-slot scene + decoded textures (no wgpu).
@@ -108,8 +112,21 @@ pub fn prepare_preview_phase1(params: PreviewParams) -> Result<PreviewPhase1> {
 
     // Full-res decode for underfill flatten/plan; scaled decode for display-only path.
     let scene_scale = if underfill_enabled { 1.0 } else { compose_scale };
-    let (required_scene, overlay_slots) =
-        build_scene_from_fills(&params.template, &params.fills, layout_seed, scene_scale);
+    let (required_scene, overlay_slots) = if let (Some(slots), Some(req)) =
+        (&params.resolved_slots, &params.fill_required)
+    {
+        let paths = fills_to_paths(&params.fills);
+        let scene = build_scene_from_resolved(
+            &params.template,
+            slots,
+            &paths,
+            req,
+            layout_seed,
+        );
+        (scene, slots.clone())
+    } else {
+        build_scene_from_fills(&params.template, &params.fills, layout_seed, scene_scale)
+    };
     let cache = DecodeCache::new();
     let required_decoded = decode_scene_cards(&required_scene, &cache)?;
 

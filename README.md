@@ -11,11 +11,15 @@ Standalone product — no dependency on the Image Stacker monolith or `image-sta
 
 ## Quick start
 
+On Windows, double-click `run-gui.bat` in this folder. That launches the GUI.
+
+From a terminal in this repo:
+
 ```text
 cargo run -p app
 ```
 
-Launches the GUI. Pick a photo folder, choose a template, preview the mural, export.
+Pick a photo folder, choose a template, preview the mural, export.
 
 ### Fixture photos (optional)
 
@@ -45,6 +49,8 @@ cargo run -p app --release -- "path/to/photos" --strip --output output/strip_lat
 - `strip_seamless_v1`
 - `strip_mural_v1`
 - `strip_10col`
+
+`strip_out_of_frame_v1` exists in code and CLI (`--strip-template strip_out_of_frame_v1`) but is **frozen**: it is not in the GUI template list. Automatic subject cutouts are not product-ready.
 
 ## Tests
 

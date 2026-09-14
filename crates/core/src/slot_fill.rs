@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 
 use crate::polaroid_card::polaroid_slot_seed;
-use crate::scene::{Rect, Scene, SceneCard};
+use crate::scene::{oof_card_style, Rect, Scene, SceneCard};
 use crate::slot::StripSlotDef;
-use crate::template::StripTemplate;
+use crate::template::{LayoutPlacer, StripTemplate};
 use crate::underfill::UnderfillBox;
 use crate::Fit;
 
@@ -23,6 +23,8 @@ pub struct LayoutSnapshot {
     pub fill_required: Vec<bool>,
     pub underfill_boxes: Vec<UnderfillBox>,
     pub underfill_paths: Vec<PathBuf>,
+    /// First figure slot if any, else first paper (out-of-frame placement).
+    pub flagship_slot_index: Option<usize>,
 }
 
 impl LayoutSnapshot {
@@ -46,6 +48,32 @@ impl LayoutSnapshot {
             fill_required,
             underfill_boxes,
             underfill_paths,
+            flagship_slot_index: None,
+        }
+    }
+
+    /// Capture resolved geometry without calling `template.resolved_slots()`.
+    pub fn capture_resolved(
+        template: &StripTemplate,
+        layout_seed: i64,
+        card_edge: &str,
+        slots: Vec<StripSlotDef>,
+        fill_required: Vec<bool>,
+        flagship_slot_index: Option<usize>,
+        underfill_boxes: Vec<UnderfillBox>,
+        underfill_paths: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            template: template.clone(),
+            canvas_width: template.canvas_width,
+            canvas_height: template.canvas_height,
+            layout_seed,
+            card_edge: card_edge.to_string(),
+            slots,
+            fill_required,
+            underfill_boxes,
+            underfill_paths,
+            flagship_slot_index,
         }
     }
 }
@@ -101,8 +129,10 @@ fn scene_card_from_slot(
     layout_seed: i64,
     slot_index: usize,
     scale: f64,
+    is_oof: bool,
 ) -> SceneCard {
     let dest = scale_rect(&Rect::from(slot), scale);
+    let (cast_shadow, edge_feather_px) = oof_card_style(is_oof, slot.cutout);
     SceneCard {
         photo_path: fill.path.clone(),
         dest,
@@ -117,6 +147,11 @@ fn scene_card_from_slot(
         cover_height_first: slot.cover_height_first,
         polaroid: slot.polaroid,
         slot_seed: polaroid_slot_seed(layout_seed, slot_index),
+        cutout: slot.cutout,
+        mask_path: slot.mask_path.clone(),
+        source_crop: slot.source_crop,
+        cast_shadow,
+        edge_feather_px,
     }
 }
 
@@ -148,7 +183,14 @@ pub fn build_scene_from_fills(
             continue;
         }
         if let Some(fill) = fills.get(i).and_then(|f| f.as_ref()) {
-            cards.push(scene_card_from_slot(slot, fill, eff_seed, i, scale));
+            cards.push(scene_card_from_slot(
+                slot,
+                fill,
+                eff_seed,
+                i,
+                scale,
+                template.layout_placer == LayoutPlacer::OutOfFrame,
+            ));
         }
     }
     cards.sort_by_key(|c| c.z);
@@ -195,6 +237,11 @@ pub fn build_scene_from_fills_with_underfill(
             cover_height_first: false,
             polaroid: false,
             slot_seed: 0,
+            cutout: false,
+            mask_path: None,
+            source_crop: None,
+            cast_shadow: false,
+            edge_feather_px: 0,
         });
     }
     underfill_cards.sort_by_key(|c| c.z);
@@ -224,13 +271,14 @@ pub fn build_scene_from_snapshot(
     };
 
     let eff_seed = snapshot.layout_seed;
+    let is_oof = snapshot.template.layout_placer == LayoutPlacer::OutOfFrame;
     let mut cards = Vec::new();
     for (i, slot) in snapshot.slots.iter().enumerate() {
         if i >= snapshot.fill_required.len() || !snapshot.fill_required[i] {
             continue;
         }
         if let Some(fill) = fills.get(i).and_then(|f| f.as_ref()) {
-            cards.push(scene_card_from_slot(slot, fill, eff_seed, i, scale));
+            cards.push(scene_card_from_slot(slot, fill, eff_seed, i, scale, is_oof));
         }
     }
     cards.sort_by_key(|c| c.z);
@@ -257,6 +305,11 @@ pub fn build_scene_from_snapshot(
             cover_height_first: false,
             polaroid: false,
             slot_seed: 0,
+            cutout: false,
+            mask_path: None,
+            source_crop: None,
+            cast_shadow: false,
+            edge_feather_px: 0,
         });
     }
     underfill_cards.sort_by_key(|c| c.z);
@@ -274,6 +327,37 @@ pub fn build_scene_from_snapshot(
 mod snapshot_tests {
     use super::*;
     use crate::get_template_by_id;
+
+    #[test]
+    fn capture_resolved_keeps_cutout_flags_without_resolved_slots() {
+        let tpl = get_template_by_id("strip_out_of_frame_v1").unwrap();
+        let slots = vec![
+            StripSlotDef::new(100, 50, 1400, 1200)
+                .with_z(0)
+                .with_rotation(1.2),
+            StripSlotDef::new(400, 200, 600, 900)
+                .with_z(100)
+                .with_cutout()
+                .with_mask_path(PathBuf::from("masks/fig1.png")),
+        ];
+        let fill_required = vec![true, true];
+        let snap = LayoutSnapshot::capture_resolved(
+            &tpl,
+            7,
+            "borderless",
+            slots.clone(),
+            fill_required.clone(),
+            Some(1),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(snap.slots.len(), 2);
+        assert!(!snap.slots[0].cutout);
+        assert!(snap.slots[1].cutout);
+        assert_eq!(snap.slots[1].mask_path.as_deref(), Some(PathBuf::from("masks/fig1.png").as_path()));
+        assert_eq!(snap.flagship_slot_index, Some(1));
+        assert_eq!(tpl.resolved_slots(Some(7)).len(), 0);
+    }
 
     #[test]
     fn snapshot_slots_survive_compose_scale_without_jitter() {

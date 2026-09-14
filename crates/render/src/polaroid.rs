@@ -354,6 +354,11 @@ mod tests {
             cover_height_first: false,
             polaroid: true,
             slot_seed: 42,
+            cutout: false,
+            mask_path: None,
+            source_crop: None,
+            cast_shadow: false,
+            edge_feather_px: 0,
         };
         let verts = polaroid_vertices(&card, PolaroidDrawMode::Reflection);
         let min_y = verts

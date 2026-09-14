@@ -21,6 +21,8 @@ pub struct RenderCard {
     pub slot_seed: u32,
     pub dest_w: i32,
     pub dest_h: i32,
+    /// Drop-shadow pass before the card (figures and optional papers).
+    pub cast_shadow: bool,
 }
 
 impl RenderCard {
@@ -157,6 +159,32 @@ pub fn split_horizontal_chunks(img: &RgbaImage, max_w: u32) -> Vec<(u32, RgbaIma
     chunks
 }
 
+fn feather_rect_alpha(img: &mut RgbaImage, px: u32) {
+    if px == 0 {
+        return;
+    }
+    let w = img.width();
+    let h = img.height();
+    if w == 0 || h == 0 {
+        return;
+    }
+    let f = px as f32;
+    for y in 0..h {
+        for x in 0..w {
+            let dx = (x as f32).min((w.saturating_sub(1) - x) as f32);
+            let dy = (y as f32).min((h.saturating_sub(1) - y) as f32);
+            let d = dx.min(dy);
+            if d >= f {
+                continue;
+            }
+            let t = (d / f).clamp(0.0, 1.0);
+            let s = t * t * (3.0 - 2.0 * t);
+            let p = img.get_pixel_mut(x, y);
+            p[3] = (p[3] as f32 * s).round() as u8;
+        }
+    }
+}
+
 pub fn prepare_render_card(
     card: &SceneCard,
     decoded: &RgbaImage,
@@ -167,9 +195,15 @@ pub fn prepare_render_card(
     let cx = card.dest.x as f32 + card.dest.w as f32 * 0.5;
     let cy = card.dest.y as f32 + card.dest.h as f32 * 0.5;
 
+    let cast_shadow = card.cast_shadow;
+
     if edge == CardEdge::Borderless {
+        let mut image = decoded.clone();
+        if card.edge_feather_px > 0 && !card.cutout {
+            feather_rect_alpha(&mut image, card.edge_feather_px);
+        }
         return RenderCard {
-            image: decoded.clone(),
+            image,
             z: card.z,
             rotation_deg: card.rotation_deg as f32,
             center_x: cx,
@@ -178,6 +212,7 @@ pub fn prepare_render_card(
             slot_seed: card.slot_seed,
             dest_w: card.dest.w,
             dest_h: card.dest.h,
+            cast_shadow,
         };
     }
 
@@ -194,12 +229,16 @@ pub fn prepare_render_card(
             )
         };
         flatten_polaroid_over_white(&inner, card.dest.w, card.dest.h)
+    } else if card.cutout {
+        decoded.clone()
     } else {
         rgba_to_opaque_rgb(decoded)
     };
 
     let mut wedge_fill = if card.polaroid {
         [255u8, 255, 255, 255]
+    } else if card.cutout {
+        [0, 0, 0, 0]
     } else {
         [bg_rgb[0], bg_rgb[1], bg_rgb[2], 255]
     };
@@ -225,6 +264,7 @@ pub fn prepare_render_card(
         slot_seed: card.slot_seed,
         dest_w: card.dest.w,
         dest_h: card.dest.h,
+        cast_shadow,
     }
 }
 

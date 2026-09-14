@@ -1,0 +1,8 @@
+---
+description: Subagent model for this repo
+alwaysApply: true
+---
+
+# Subagent model
+
+When dispatching Task/subagents, always use **composer-2.5** (not Fast, not other slugs). Do not use `composer-2.5-fast`, `inherit`, or Grok/GPT/Claude variants unless the user explicitly names a different model in that message.

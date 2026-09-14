@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use core::{
     build_seamless_mosaic_v1_slots, build_scene, get_template_by_id, mosaic_canvas_extent,
-    pick_smart_fills, validate_strip_unique_sources, CoreError, TEMPLATE_IDS,
+    pick_smart_fills, validate_strip_unique_sources, CoreError, LayoutPlacer, TEMPLATE_IDS,
 };
 
 #[test]
-fn all_six_templates_registered() {
+fn all_seven_templates_registered() {
     let expected: &[(&str, usize, usize)] = &[
         ("strip_mural_v2", 35, 35),
         ("strip_polaroid_table_v1", 24, 20),
@@ -14,8 +14,9 @@ fn all_six_templates_registered() {
         ("strip_seamless_v1", 9, 9),
         ("strip_mural_v1", 8, 8),
         ("strip_10col", 10, 10),
+        ("strip_out_of_frame_v1", 0, 26),
     ];
-    assert_eq!(TEMPLATE_IDS.len(), 6);
+    assert_eq!(TEMPLATE_IDS.len(), 7);
     for (id, total, required) in expected {
         let tpl = get_template_by_id(id).expect(id);
         assert_eq!(tpl.num_slots(), *total, "{id} total slots");
@@ -79,6 +80,18 @@ fn uniqueness_fails_when_too_few_files() {
         }
         other => panic!("unexpected error: {other}"),
     }
+}
+
+#[test]
+fn out_of_frame_resolved_slots_empty_seed_only() {
+    let tpl = get_template_by_id("strip_out_of_frame_v1").unwrap();
+    assert_eq!(tpl.layout_placer, LayoutPlacer::OutOfFrame);
+    assert_eq!(tpl.num_slots(), 0);
+    assert_eq!(tpl.strip_image_slot_count(None), 26);
+    assert_eq!(tpl.resolved_slots(Some(7)).len(), 0);
+    assert_eq!(tpl.background_underfill_count(), 0);
+    let paths: Vec<PathBuf> = vec![PathBuf::from("one.jpg")];
+    validate_strip_unique_sources(&tpl, &paths, false, Some(7)).unwrap();
 }
 
 #[test]

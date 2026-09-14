@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{CoreError, Result};
 use crate::io::IMAGE_EXTENSIONS;
 use crate::python_rng::PythonRandom;
-use crate::template::StripTemplate;
+use crate::template::{LayoutPlacer, StripTemplate};
 
 /// Resolve `spec` to an image path: existing file, file under `folder`, or unique
 /// substring match among top-level images in `folder`.
@@ -102,7 +102,21 @@ pub fn pin_strip_hero_fill(
     allow_repeats: bool,
     rng: &mut PythonRandom,
 ) -> Result<()> {
-    let hi = template.layout_flagship_slot_index.ok_or_else(|| {
+    pin_strip_hero_fill_at(fills, template, None, hero_path, layout_seed, pool_paths, allow_repeats, rng)
+}
+
+/// Pin hero to flagship slot; `flagship_slot_index` overrides template default (snapshot lock).
+pub fn pin_strip_hero_fill_at(
+    fills: &mut [Option<PathBuf>],
+    template: &StripTemplate,
+    flagship_slot_index: Option<usize>,
+    hero_path: &Path,
+    layout_seed: Option<i64>,
+    pool_paths: &[PathBuf],
+    allow_repeats: bool,
+    rng: &mut PythonRandom,
+) -> Result<()> {
+    let hi = flagship_slot_index.or(template.layout_flagship_slot_index).ok_or_else(|| {
         CoreError::InvalidInput(format!(
             "Template {:?} has no flagship (hero) slot -- omit --strip-hero-image.",
             template.id
@@ -110,6 +124,13 @@ pub fn pin_strip_hero_fill(
     })?;
 
     let req = template.strip_effective_fill_required(layout_seed);
+    let req = if template.layout_placer == LayoutPlacer::OutOfFrame
+        || (req.is_empty() && !fills.is_empty())
+    {
+        vec![true; fills.len()]
+    } else {
+        req
+    };
     if hi >= fills.len() || hi >= req.len() {
         return Err(CoreError::InvalidInput(format!(
             "Invalid flagship slot index {hi} for current fill list."
@@ -220,5 +241,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fills[hi].as_ref().unwrap(), &hero);
+    }
+
+    #[test]
+    fn pins_flagship_slot_out_of_frame() {
+        let tpl = crate::get_template_by_id("strip_out_of_frame_v1").unwrap();
+        assert!(tpl.strip_effective_fill_required(Some(0)).is_empty());
+        let mut fills: Vec<Option<PathBuf>> = (0..4)
+            .map(|i| Some(PathBuf::from(format!("/tmp/oof{i}.jpg"))))
+            .collect();
+        let hero = PathBuf::from("/tmp/HERO_OOF.jpg");
+        let pool: Vec<PathBuf> = (0..4)
+            .map(|i| PathBuf::from(format!("/tmp/oof{i}.jpg")))
+            .collect();
+        let mut rng = PythonRandom::new(1);
+        pin_strip_hero_fill_at(
+            &mut fills,
+            &tpl,
+            Some(2),
+            &hero,
+            Some(0),
+            &pool,
+            true,
+            &mut rng,
+        )
+        .unwrap();
+        assert_eq!(fills[2].as_ref().unwrap(), &hero);
     }
 }

@@ -5,7 +5,11 @@ use crate::slot::StripSlotDef;
 pub enum LayoutPlacer {
     Jitter,
     OrganicPolaroid,
+    OutOfFrame,
 }
+
+/// Max paper + figure slots for out-of-frame placement.
+pub const OUT_OF_FRAME_MAX_SLOTS: usize = 10 + 16;
 
 #[derive(Debug, Clone)]
 pub struct StripTemplate {
@@ -60,6 +64,9 @@ impl StripTemplate {
             let n = build_seamless_mosaic_v1_slots(eff).len();
             return vec![true; n];
         }
+        if self.layout_placer == LayoutPlacer::OutOfFrame {
+            return Vec::new();
+        }
         self.effective_slot_fill_required()
     }
 
@@ -68,6 +75,9 @@ impl StripTemplate {
     }
 
     pub fn strip_image_slot_count(&self, layout_seed: Option<i64>) -> usize {
+        if self.layout_placer == LayoutPlacer::OutOfFrame {
+            return OUT_OF_FRAME_MAX_SLOTS;
+        }
         if self.id == "strip_seamless_mosaic_v1" && layout_seed.is_none() {
             return crate::mosaic::mosaic_v1_max_slot_count();
         }
@@ -88,6 +98,9 @@ impl StripTemplate {
         let eff = layout_seed.unwrap_or(0);
         if self.id == "strip_seamless_mosaic_v1" {
             return build_seamless_mosaic_v1_slots(eff);
+        }
+        if self.layout_placer == LayoutPlacer::OutOfFrame {
+            return self.slots.clone();
         }
         if self.layout_placer == LayoutPlacer::OrganicPolaroid {
             return crate::layout_polaroid::resolve_organic_polaroid_slots(
@@ -471,6 +484,38 @@ pub fn template_strip_polaroid_table_v1() -> StripTemplate {
         gap_fill_stop_ratio: 0.004,
         procedural_background: Some("wood_polaroid_table"),
         layout_placer: LayoutPlacer::OrganicPolaroid,
+    }
+}
+
+pub fn template_strip_out_of_frame_v1() -> StripTemplate {
+    let (cw, ch, sw, sh, sc, ov) = base_geometry();
+    StripTemplate {
+        id: "strip_out_of_frame_v1",
+        canvas_width: cw,
+        canvas_height: ch,
+        slice_width: sw,
+        slice_height: sh,
+        slice_count: sc,
+        overlap_px: ov,
+        background: "#ece8e3",
+        slots: Vec::new(),
+        slot_fill_required: None,
+        layout_jitter_px: 0,
+        layout_cover_slot_index: None,
+        layout_cover_max_jitter: 14,
+        layout_flagship_slot_index: None,
+        layout_flagship_max_jitter: 18,
+        layout_flagship_rim_slot_indices: vec![],
+        background_underfill_layers: 0,
+        background_underfill_boost_layers: 0,
+        background_underfill_repeat_layers: 0,
+        background_tail_underfill_layers: 0,
+        background_tail_slice_count: 2,
+        gap_fill_max_layers: 0,
+        gap_fill_beige_tolerance: 48,
+        gap_fill_stop_ratio: 0.004,
+        procedural_background: None,
+        layout_placer: LayoutPlacer::OutOfFrame,
     }
 }
 

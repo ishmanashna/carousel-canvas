@@ -54,6 +54,11 @@ pub struct DecodeOptions {
     pub contain_fill_rgb: [u8; 3],
     pub require_portrait: bool,
     pub require_landscape: bool,
+    /// Keep RGBA through decode (cutout figures); apply `mask_path` when set.
+    pub preserve_alpha: bool,
+    pub mask_path: Option<std::path::PathBuf>,
+    /// Oriented-source crop `[x, y, w, h]` so Cover fits the subject, not the full photo.
+    pub source_crop: Option<[i32; 4]>,
 }
 
 impl Default for DecodeOptions {
@@ -69,6 +74,9 @@ impl Default for DecodeOptions {
             contain_fill_rgb: [255, 255, 255],
             require_portrait: false,
             require_landscape: false,
+            preserve_alpha: false,
+            mask_path: None,
+            source_crop: None,
         }
     }
 }
@@ -83,6 +91,9 @@ impl From<&SceneCard> for DecodeOptions {
             source_trim_left_frac: card.source_trim_left_frac,
             horizontal_center_band_frac: card.horizontal_center_band_frac,
             cover_height_first: card.cover_height_first,
+            preserve_alpha: card.cutout,
+            mask_path: card.mask_path.clone(),
+            source_crop: card.source_crop,
             ..Default::default()
         }
     }
@@ -140,6 +151,9 @@ pub fn decode_options_from_slot(slot: &core::StripSlotDef) -> DecodeOptions {
         cover_height_first: slot.cover_height_first,
         require_portrait: slot.prefer_portrait,
         require_landscape: slot.prefer_landscape,
+        preserve_alpha: slot.cutout,
+        mask_path: slot.mask_path.clone(),
+        source_crop: slot.source_crop,
         ..Default::default()
     }
 }
@@ -209,6 +223,11 @@ mod tests {
             cover_height_first: false,
             polaroid: false,
             slot_seed: 0,
+            cutout: false,
+            mask_path: None,
+            source_crop: None,
+            cast_shadow: false,
+            edge_feather_px: 0,
         };
         let opts = DecodeOptions::from(&card);
         assert_eq!(opts.fit, Fit::Contain);

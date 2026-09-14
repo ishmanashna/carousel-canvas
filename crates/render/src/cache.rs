@@ -44,6 +44,12 @@ struct CacheKey {
 
     fit_tag: u8,
 
+    preserve_alpha: bool,
+
+    mask_path: Option<PathBuf>,
+
+    source_crop: Option<[i32; 4]>,
+
 }
 
 
@@ -87,6 +93,12 @@ impl CacheKey {
                 core::Fit::Contain => 1,
 
             },
+
+            preserve_alpha: options.preserve_alpha,
+
+            mask_path: options.mask_path.clone(),
+
+            source_crop: options.source_crop,
 
         }
 
@@ -384,6 +396,12 @@ mod tests {
             require_portrait: false,
 
             require_landscape: false,
+
+            preserve_alpha: false,
+
+            mask_path: None,
+
+            source_crop: None,
 
         }
 

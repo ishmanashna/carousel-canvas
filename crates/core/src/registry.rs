@@ -8,6 +8,7 @@ pub const TEMPLATE_IDS: &[&str] = &[
     "strip_seamless_v1",
     "strip_mural_v1",
     "strip_10col",
+    "strip_out_of_frame_v1",
 ];
 
 pub fn get_template_by_id(template_id: &str) -> Result<StripTemplate> {
@@ -18,6 +19,7 @@ pub fn get_template_by_id(template_id: &str) -> Result<StripTemplate> {
         "strip_seamless_v1" => Ok(crate::template::template_strip_seamless_v1()),
         "strip_seamless_mosaic_v1" => Ok(crate::template::template_strip_seamless_mosaic_v1()),
         "strip_polaroid_table_v1" => Ok(crate::template::template_strip_polaroid_table_v1()),
+        "strip_out_of_frame_v1" => Ok(crate::template::template_strip_out_of_frame_v1()),
         other => Err(CoreError::UnknownTemplate(other.to_string())),
     }
 }

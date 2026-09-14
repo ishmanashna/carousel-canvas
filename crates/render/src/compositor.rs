@@ -27,7 +27,15 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(card_tex, card_sampler, in.uv);
 }
+@fragment
+fn fs_shadow(in: VertexOutput) -> @location(0) vec4<f32> {
+    let tex = textureSample(card_tex, card_sampler, in.uv);
+    return vec4<f32>(0.0, 0.0, 0.0, tex.a * 0.45);
+}
 "#;
+
+const SHADOW_OFFSET_X: f32 = 12.0;
+const SHADOW_OFFSET_Y: f32 = 16.0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -50,6 +58,7 @@ pub struct Compositor {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     polaroid_pipeline: wgpu::RenderPipeline,
@@ -123,6 +132,38 @@ impl Compositor {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("card_shadow_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 8, shader_location: 1 },
+                    ],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_shadow"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba8UnormSrgb,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -227,6 +268,7 @@ impl Compositor {
             device,
             queue,
             pipeline,
+            shadow_pipeline,
             uniform_buffer,
             uniform_bind_group,
             polaroid_pipeline,
@@ -328,6 +370,34 @@ impl Compositor {
         pass.draw(0..6, 0..1);
     }
 
+    fn draw_textured_quad_shadow(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        gpu_tex: &GpuCardTexture,
+        corners: [[f32; 2]; 4],
+        uvs: [[f32; 2]; 4],
+    ) {
+        let offset_corners = offset_corners(corners, SHADOW_OFFSET_X, SHADOW_OFFSET_Y);
+        let verts = [
+            Vertex { pos: offset_corners[0], uv: uvs[0] },
+            Vertex { pos: offset_corners[1], uv: uvs[1] },
+            Vertex { pos: offset_corners[2], uv: uvs[2] },
+            Vertex { pos: offset_corners[0], uv: uvs[0] },
+            Vertex { pos: offset_corners[2], uv: uvs[2] },
+            Vertex { pos: offset_corners[3], uv: uvs[3] },
+        ];
+        let vbuf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("card_shadow_verts"),
+            contents: bytemuck::cast_slice(&verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        pass.set_pipeline(&self.shadow_pipeline);
+        pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        pass.set_bind_group(1, &gpu_tex.bind_group, &[]);
+        pass.set_vertex_buffer(0, vbuf.slice(..));
+        pass.draw(0..6, 0..1);
+    }
+
     fn draw_textured_quad(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -423,11 +493,18 @@ impl Compositor {
                     [x + cw, top + ch],
                     [x, top + ch],
                 ];
-                self.draw_textured_quad(pass, chunk_tex, corners, unit_uvs());
+                let uvs = unit_uvs();
+                if card.cast_shadow {
+                    self.draw_textured_quad_shadow(pass, chunk_tex, corners, uvs);
+                }
+                self.draw_textured_quad(pass, chunk_tex, corners, uvs);
             }
             return;
         }
         let (corners, uvs) = render_card_corners(card);
+        if card.cast_shadow {
+            self.draw_textured_quad_shadow(pass, gpu_tex, corners, uvs);
+        }
         self.draw_textured_quad(pass, gpu_tex, corners, uvs);
     }
 
@@ -867,6 +944,10 @@ fn unit_uvs() -> [[f32; 2]; 4] {
     [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
 }
 
+fn offset_corners(corners: [[f32; 2]; 4], dx: f32, dy: f32) -> [[f32; 2]; 4] {
+    corners.map(|[x, y]| [x + dx, y + dy])
+}
+
 fn polaroid_scene_card(card: &RenderCard) -> core::SceneCard {
     core::SceneCard {
         photo_path: std::path::PathBuf::new(),
@@ -887,6 +968,11 @@ fn polaroid_scene_card(card: &RenderCard) -> core::SceneCard {
         cover_height_first: false,
         polaroid: true,
         slot_seed: card.slot_seed,
+        cutout: false,
+        mask_path: None,
+        source_crop: None,
+        cast_shadow: false,
+        edge_feather_px: 0,
     }
 }
 
@@ -986,9 +1072,107 @@ pub fn tile_camera_rect(slice_index: usize, slice_w: i32, slice_h: i32, bleed_px
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::card_edge::RenderCard;
+    use crate::strip_export::create_offscreen_compositor;
+    use image::Rgba;
+
     #[test]
     fn tile_camera_strip_10col() {
         assert_eq!(tile_camera_rect(0, 1080, 1350, 0), (0, 0, 1080, 1350));
         assert_eq!(tile_camera_rect(9, 1080, 1350, 0), (9720, 0, 10800, 1350));
+    }
+
+    fn solid_card(
+        w: u32,
+        h: u32,
+        color: [u8; 4],
+        cx: f32,
+        cy: f32,
+        z: i32,
+        cast_shadow: bool,
+    ) -> RenderCard {
+        RenderCard {
+            image: RgbaImage::from_pixel(w, h, Rgba(color)),
+            z,
+            rotation_deg: 0.0,
+            center_x: cx,
+            center_y: cy,
+            polaroid: false,
+            slot_seed: 0,
+            dest_w: w as i32,
+            dest_h: h as i32,
+            cast_shadow,
+        }
+    }
+
+    fn card_with_center_hole(w: u32, h: u32, fg: [u8; 4], cx: f32, cy: f32, z: i32) -> RenderCard {
+        let mut img = RgbaImage::from_pixel(w, h, Rgba(fg));
+        let hole_r = (w.min(h) / 4) as i32;
+        let hx = (w / 2) as i32;
+        let hy = (h / 2) as i32;
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as i32 - hx;
+                let dy = y as i32 - hy;
+                if dx * dx + dy * dy <= hole_r * hole_r {
+                    img.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+                }
+            }
+        }
+        RenderCard {
+            image: img,
+            z,
+            rotation_deg: 0.0,
+            center_x: cx,
+            center_y: cy,
+            polaroid: false,
+            slot_seed: 0,
+            dest_w: w as i32,
+            dest_h: h as i32,
+            cast_shadow: true,
+        }
+    }
+
+    #[test]
+    fn overlapping_cutout_shows_bottom_card_through_hole() {
+        let compositor = create_offscreen_compositor().expect("gpu");
+        let cards = [
+            solid_card(80, 80, [220, 30, 30, 255], 60.0, 60.0, 0, false),
+            card_with_center_hole(80, 80, [30, 200, 30, 255], 60.0, 60.0, 1),
+        ];
+        let rgba = compositor
+            .render_scene_to_rgb(&cards, "#ffffff", None, 120, 120)
+            .expect("render");
+        let center = rgba.get_pixel(60, 60).0;
+        assert!(
+            center[0] > center[1] + 40,
+            "hole should reveal red bottom card, got {:?}",
+            center
+        );
+    }
+
+    #[test]
+    fn cutout_shadow_darkens_pixels_beside_card() {
+        let compositor = create_offscreen_compositor().expect("gpu");
+        let with_shadow = [solid_card(40, 40, [10, 10, 10, 255], 50.0, 50.0, 0, true)];
+        let without_shadow = [solid_card(40, 40, [10, 10, 10, 255], 50.0, 50.0, 0, false)];
+        let bg = "#f0f0f0";
+        let shadowed = compositor
+            .render_scene_to_rgb(&with_shadow, bg, None, 120, 120)
+            .expect("render shadow");
+        let plain = compositor
+            .render_scene_to_rgb(&without_shadow, bg, None, 120, 120)
+            .expect("render plain");
+        // Just outside the card's right edge; shadow offset is (+12, +16).
+        let sx = 72u32;
+        let sy = 66u32;
+        let shadow_px = shadowed.get_pixel(sx, sy).0;
+        let plain_px = plain.get_pixel(sx, sy).0;
+        let shadow_luma = shadow_px[0] as u32 + shadow_px[1] as u32 + shadow_px[2] as u32;
+        let plain_luma = plain_px[0] as u32 + plain_px[1] as u32 + plain_px[2] as u32;
+        assert!(
+            shadow_luma < plain_luma,
+            "shadow should darken bg beside card: shadow={shadow_px:?} plain={plain_px:?}"
+        );
     }
 }

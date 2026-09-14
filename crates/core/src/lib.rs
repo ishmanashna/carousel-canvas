@@ -1,8 +1,10 @@
+pub mod analysis;
 pub mod assign;
 pub mod error;
 pub mod hero_pin;
 pub mod io;
 pub mod layout_jitter;
+pub mod layout_out_of_frame;
 pub mod layout_polaroid;
 pub mod layout_retry;
 pub mod mosaic;
@@ -16,11 +18,16 @@ pub mod template;
 pub mod token_fill;
 pub mod underfill;
 
-pub use assign::{
-    aspect_hint_from_path, pick_dumb_fills, pick_smart_fills, pick_underfill_paths,
-    validate_strip_unique_sources, AspectClass,
+pub use analysis::{
+    complete_subject_from_mask, harden_cutout_alpha, isolate_largest_blob, occupancy_from_mask,
+    padded_subject_crop, role_from_mask, subject_bbox_from_mask, OccupancyMap, PhotoAnalysis,
+    PhotoRole,
 };
-pub use hero_pin::{pin_strip_hero_fill, resolve_strip_hero_argument};
+pub use assign::{
+    aspect_hint_from_path, pick_dumb_fills, pick_out_of_frame_fills, pick_smart_fills,
+    pick_underfill_paths, validate_strip_unique_sources, AspectClass,
+};
+pub use hero_pin::{pin_strip_hero_fill, pin_strip_hero_fill_at, resolve_strip_hero_argument};
 pub use error::{CoreError, Result, count_unique_paths};
 pub use io::{is_image_path, scan_image_folder, validate_unique_sources, IMAGE_EXTENSIONS};
 pub use layout_retry::{
@@ -28,6 +35,7 @@ pub use layout_retry::{
     strip_layout_token_retry_enabled, underfill_rng_from_layout_seed, underfill_rng_seed,
     MURAL_V2_LAYOUT_RETRY_ATTEMPTS, TOKEN_COMPOSE_SCALE,
 };
+pub use layout_out_of_frame::{flagship_slot_index, resolve_out_of_frame_slots};
 pub use layout_polaroid::resolve_organic_polaroid_slots;
 pub use mosaic::{build_seamless_mosaic_v1_slots, mosaic_canvas_extent, mosaic_v1_max_slot_count};
 pub use polaroid_card::{
@@ -36,7 +44,10 @@ pub use polaroid_card::{
 };
 pub use python_rng::PythonRandom;
 pub use registry::{default_template, get_template_by_id, max_strip_slots, TEMPLATE_IDS};
-pub use scene::{build_scene, build_scene_with_underfill, compute_bleed_px, Rect, Scene, SceneCard};
+pub use scene::{
+    build_scene, build_scene_from_resolved, build_scene_with_underfill, compute_bleed_px, Rect,
+    Scene, SceneCard,
+};
 pub use slot_fill::{
     build_scene_from_fills, build_scene_from_fills_with_underfill, build_scene_from_snapshot,
     fills_to_paths, scale_rect, scale_underfill_box, LayoutSnapshot, SlotFill,

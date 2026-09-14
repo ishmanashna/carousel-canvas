@@ -208,6 +208,9 @@ pub fn resolve_slots_for_layout(
     template: &StripTemplate,
     layout_seed: i64,
 ) -> Vec<StripSlotDef> {
+    if template.layout_placer == LayoutPlacer::OutOfFrame {
+        return template.slots.clone();
+    }
     if template.id == "strip_seamless_mosaic_v1" {
         return crate::mosaic::build_seamless_mosaic_v1_slots(layout_seed);
     }

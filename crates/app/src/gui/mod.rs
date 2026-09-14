@@ -1,16 +1,19 @@
+mod analysis;
 mod settings;
 mod slot_state;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use core::{
-    fills_to_paths, get_template_by_id, max_strip_slots, pick_dumb_fills, pick_smart_fills,
-    scan_image_folder, LayoutSnapshot, SlotFill, StripTemplate,
+    fills_to_paths, flagship_slot_index, get_template_by_id, max_strip_slots, pick_dumb_fills,
+    pick_out_of_frame_fills, pick_smart_fills, resolve_out_of_frame_slots, scan_image_folder,
+    LayoutPlacer, LayoutSnapshot, PhotoAnalysis, SlotFill, StripSlotDef, StripTemplate,
 };
 use eframe::egui;
 use render::{
@@ -186,6 +189,13 @@ pub struct CarouselApp {
     preview_rx: Option<Receiver<(u64, PreviewMsg)>>,
     preview_generation: u64,
 
+    photo_analyses: Option<Vec<PhotoAnalysis>>,
+    analysis_generation: u64,
+    analysis_job: Option<analysis::AnalysisJob>,
+
+    placed_slots: Option<Vec<StripSlotDef>>,
+    placed_fill_required: Option<Vec<bool>>,
+
     layout_locked: bool,
     layout_snapshot: Option<LayoutSnapshot>,
     show_unlock_confirm: bool,
@@ -194,7 +204,13 @@ pub struct CarouselApp {
 
 impl CarouselApp {
     fn new() -> Self {
-        let settings = load_settings();
+        let mut settings = load_settings();
+        if !TEMPLATE_OPTIONS
+            .iter()
+            .any(|(id, _)| *id == settings.strip_template)
+        {
+            settings.strip_template = "strip_mural_v2".into();
+        }
         let template = get_template_by_id(&settings.strip_template)
             .unwrap_or_else(|_| get_template_by_id("strip_mural_v2").unwrap());
         let mut app = Self {
@@ -232,6 +248,11 @@ impl CarouselApp {
             last_export_dir: None,
             preview_rx: None,
             preview_generation: 0,
+            photo_analyses: None,
+            analysis_generation: 0,
+            analysis_job: None,
+            placed_slots: None,
+            placed_fill_required: None,
             layout_locked: false,
             layout_snapshot: None,
             show_unlock_confirm: false,
@@ -260,6 +281,9 @@ impl CarouselApp {
     }
 
     fn card_edge(&self) -> CardEdge {
+        if self.is_out_of_frame() {
+            return CardEdge::Borderless;
+        }
         CardEdge::parse(&self.settings.strip_card_edge).unwrap_or(CardEdge::Borderless)
     }
 
@@ -276,12 +300,24 @@ impl CarouselApp {
     }
 
     fn flagship_slot(&self) -> Option<usize> {
-        self.template.layout_flagship_slot_index
+        resolve_flagship_slot_index(
+            self.layout_snapshot.as_ref(),
+            self.placed_slots.as_deref(),
+            self.is_out_of_frame(),
+            self.template.layout_flagship_slot_index,
+        )
     }
 
     fn fill_required_bitmap(&self) -> Vec<bool> {
         if let Some(snap) = &self.layout_snapshot {
             snap.fill_required.clone()
+        } else if self.is_out_of_frame() {
+            if let Some(req) = &self.placed_fill_required {
+                req.clone()
+            } else {
+                let n = self.placed_slots.as_ref().map(|s| s.len()).unwrap_or(0);
+                vec![true; n]
+            }
         } else {
             self.template
                 .strip_effective_fill_required(Some(self.layout_seed))
@@ -397,19 +433,37 @@ impl CarouselApp {
     }
 
     fn capture_layout_snapshot(&mut self, built: &PreviewBuildResult) {
-        self.layout_snapshot = Some(LayoutSnapshot::capture(
-            &self.template,
-            self.layout_seed,
-            &self.settings.strip_card_edge,
-            built.underfill_boxes.clone(),
-            built.underfill_paths.clone(),
-        ));
+        self.layout_snapshot = Some(if self.is_out_of_frame() {
+            let overlay =
+                out_of_frame_lock_slots(&built.overlay_slots, self.placed_slots.as_deref());
+            let fill_required = vec![true; overlay.len()];
+            LayoutSnapshot::capture_resolved(
+                &self.template,
+                self.layout_seed,
+                "borderless",
+                overlay.clone(),
+                fill_required,
+                flagship_slot_index(&overlay),
+                built.underfill_boxes.clone(),
+                built.underfill_paths.clone(),
+            )
+        } else {
+            LayoutSnapshot::capture(
+                &self.template,
+                self.layout_seed,
+                &self.settings.strip_card_edge,
+                built.underfill_boxes.clone(),
+                built.underfill_paths.clone(),
+            )
+        });
         self.layout_locked = true;
     }
 
     fn effective_num_slots(&self) -> usize {
         if let Some(snap) = &self.layout_snapshot {
             snap.slots.len()
+        } else if self.is_out_of_frame() {
+            self.placed_slots.as_ref().map(|s| s.len()).unwrap_or(0)
         } else {
             self.template
                 .strip_effective_num_slots(Some(self.layout_seed))
@@ -435,6 +489,141 @@ impl CarouselApp {
         dlg.pick_file()
     }
 
+    fn is_out_of_frame(&self) -> bool {
+        self.template.layout_placer == LayoutPlacer::OutOfFrame
+    }
+
+    fn cancel_analysis_job(&mut self) {
+        if let Some(job) = self.analysis_job.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn clear_photo_analyses(&mut self) {
+        self.photo_analyses = None;
+    }
+
+    fn clear_placed_slots(&mut self) {
+        self.placed_slots = None;
+        self.placed_fill_required = None;
+    }
+
+    fn place_out_of_frame(&mut self, randomize_layout: bool) {
+        if randomize_layout {
+            self.layout_seed = random_layout_seed();
+        }
+        let analyses = match &self.photo_analyses {
+            Some(a) => a,
+            None => return,
+        };
+        let slots = resolve_out_of_frame_slots(
+            analyses,
+            self.template.canvas_width,
+            self.template.canvas_height,
+            self.template.slice_width,
+            self.layout_seed,
+        );
+        if slots.is_empty() {
+            self.clear_placed_slots();
+            self.slots.reset();
+            self.selected_slot = None;
+            self.preview_dirty = true;
+            self.status =
+                "No slots placed (need at least one usable photo).".into();
+            return;
+        }
+        let seed = assign_seed();
+        match pick_out_of_frame_fills(analyses, &slots, seed) {
+            Ok(fills) => {
+                let n = fills.len();
+                let papers = slots.iter().filter(|s| !s.cutout).count();
+                let figures = slots.iter().filter(|s| s.cutout).count();
+                self.placed_slots = Some(slots);
+                self.placed_fill_required = Some(vec![true; n]);
+                self.slots.set_assignments_from_paths(fills);
+                self.slots.clear_undo();
+                self.selected_slot = None;
+                self.preview_dirty = true;
+                self.status = format!(
+                    "Placed {n} slots ({papers} papers, {figures} figures).",
+                );
+            }
+            Err(e) => {
+                self.clear_placed_slots();
+                self.slots.reset();
+                self.selected_slot = None;
+                self.preview_dirty = true;
+                self.status = format!("Assign failed: {e}");
+            }
+        }
+    }
+
+    fn start_analysis(&mut self) {
+        if !self.is_out_of_frame() || self.layout_locked || self.source_paths.is_empty() {
+            return;
+        }
+        self.cancel_analysis_job();
+        self.analysis_generation = self.analysis_generation.wrapping_add(1);
+        let gen = self.analysis_generation;
+        let paths = self.source_paths.clone();
+        self.analysis_job = Some(analysis::spawn_analyze(paths, gen));
+    }
+
+    fn poll_analysis(&mut self, ctx: &egui::Context) {
+        let Some(job) = self.analysis_job.as_ref() else {
+            return;
+        };
+        let mut finished = false;
+        let mut place_after_done = false;
+        while let Ok((gen, event)) = job.rx.try_recv() {
+            if gen != self.analysis_generation {
+                continue;
+            }
+            match event {
+                analysis::AnalysisEvent::ModelStatus(msg) => self.status = msg,
+                analysis::AnalysisEvent::Progress { done, total } => {
+                    self.status = format!("Reading photos {done}/{total}");
+                }
+                analysis::AnalysisEvent::Done(analyses) => {
+                    let n = analyses.len();
+                    self.photo_analyses = Some(analyses);
+                    self.status = format!("Read {n} photos.");
+                    place_after_done = !self.layout_locked;
+                    finished = true;
+                }
+                analysis::AnalysisEvent::Failed(e) => {
+                    self.preview_error = Some(e.clone());
+                    self.status = format!("Analysis failed: {e}");
+                    finished = true;
+                }
+            }
+        }
+        if finished {
+            self.analysis_job = None;
+            if place_after_done {
+                self.place_out_of_frame(false);
+            }
+        } else if self.analysis_job.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    fn leave_out_of_frame_if_needed(&mut self, was_out_of_frame: bool) {
+        if was_out_of_frame && !self.is_out_of_frame() {
+            self.cancel_analysis_job();
+            self.clear_photo_analyses();
+            self.clear_placed_slots();
+        }
+    }
+
+    fn enter_out_of_frame_if_needed(&mut self, was_out_of_frame: bool) {
+        if !was_out_of_frame && self.is_out_of_frame() {
+            self.clear_photo_analyses();
+            self.clear_placed_slots();
+            self.start_analysis();
+        }
+    }
+
     fn reload_folder(&mut self) {
         if self.layout_locked {
             self.status = "Unlock layout before changing the input folder.".into();
@@ -443,11 +632,19 @@ impl CarouselApp {
         let folder = PathBuf::from(&self.settings.input_folder);
         if !folder.is_dir() {
             self.source_paths.clear();
+            self.cancel_analysis_job();
+            self.clear_photo_analyses();
+            self.clear_placed_slots();
             return;
         }
         match scan_image_folder(&folder) {
             Ok(paths) => {
                 self.source_paths = paths;
+                if self.is_out_of_frame() {
+                    self.cancel_analysis_job();
+                    self.clear_photo_analyses();
+                    self.clear_placed_slots();
+                }
                 self.refill_from_folder(true);
             }
             Err(e) => self.status = format!("Folder scan failed: {e}"),
@@ -461,8 +658,22 @@ impl CarouselApp {
         }
         if self.source_paths.is_empty() {
             self.slots.reset();
+            self.clear_placed_slots();
             self.selected_slot = None;
             self.preview_dirty = true;
+            return;
+        }
+        if self.is_out_of_frame() {
+            if self.analysis_job.is_some() {
+                self.status = "Analyzing photos…".into();
+                return;
+            }
+            if self.photo_analyses.is_none() {
+                self.status = "Reading photos…".into();
+                self.start_analysis();
+                return;
+            }
+            self.place_out_of_frame(randomize);
             return;
         }
         if randomize {
@@ -527,9 +738,25 @@ impl CarouselApp {
     }
 
     fn preview_ready(&self) -> bool {
+        if self.is_out_of_frame() && !self.layout_locked {
+            let empty = self
+                .placed_slots
+                .as_ref()
+                .map_or(true, |s| s.is_empty());
+            if empty {
+                return false;
+            }
+        }
         let req = self.fill_required_bitmap();
         let n = self.effective_num_slots();
-        !(0..n).any(|i| req.get(i) == Some(&true) && self.slots.assignments[i].is_none())
+        !(0..n).any(|i| {
+            req.get(i) == Some(&true)
+                && self
+                    .slots
+                    .assignments
+                    .get(i)
+                    .map_or(true, |s| s.is_none())
+        })
     }
 
     fn ensure_compositor(&mut self, frame: &eframe::Frame) {
@@ -578,6 +805,14 @@ impl CarouselApp {
             return;
         }
 
+        let (resolved_slots, fill_required) = if self.is_out_of_frame() {
+            (
+                self.placed_slots.clone(),
+                self.placed_fill_required.clone(),
+            )
+        } else {
+            (None, None)
+        };
         let params = PreviewParams {
             template: self.template.clone(),
             fills: self.fills_for_preview(),
@@ -586,6 +821,8 @@ impl CarouselApp {
             card_edge: self.card_edge(),
             border_rgb: self.border_rgb(),
             include_underfill: self.include_underfill(),
+            resolved_slots,
+            fill_required,
         };
         let (tx, rx) = mpsc::channel();
         self.preview_rx = Some(rx);
@@ -824,9 +1061,8 @@ impl CarouselApp {
                 self.required_count()
             ));
         }
-        let n = self.effective_num_slots();
-        let fills: Vec<Option<SlotFill>> = self.slots.assignments[..n].to_vec();
-        if self.settings.strip_allow_photo_repeats {
+        let fills = self.fills_for_preview();
+        if self.settings.strip_allow_photo_repeats || self.is_out_of_frame() {
             return Ok(());
         }
         let need = self.required_count();
@@ -857,8 +1093,7 @@ impl CarouselApp {
             self.status = e;
             return;
         }
-        let n = self.effective_num_slots();
-        let slot_fills: Vec<Option<SlotFill>> = self.slots.assignments[..n].to_vec();
+        let slot_fills = self.fills_for_preview();
         let fills = fills_to_paths(&slot_fills);
         let locked_layout = if self.layout_locked {
             self.layout_snapshot.clone()
@@ -869,6 +1104,14 @@ impl CarouselApp {
             .as_ref()
             .map(|s| s.layout_seed)
             .unwrap_or(self.layout_seed);
+        let (resolved_slots, fill_required) = if self.is_out_of_frame() && !self.layout_locked {
+            (
+                self.placed_slots.clone(),
+                self.placed_fill_required.clone(),
+            )
+        } else {
+            (None, None)
+        };
         let params = StripExportParams {
             template: self.template.clone(),
             fills,
@@ -877,8 +1120,10 @@ impl CarouselApp {
             layout_seed,
             card_edge: self.card_edge(),
             border_rgb: self.border_rgb(),
-            no_layout_retry: self.layout_locked,
+            no_layout_retry: self.layout_locked || self.is_out_of_frame(),
             locked_layout,
+            resolved_slots,
+            fill_required,
             output_dir: PathBuf::from(&self.settings.output_folder),
         };
         let (tx, rx) = mpsc::channel();
@@ -1433,11 +1678,16 @@ impl CarouselApp {
                         if ui.selectable_value(&mut tpl_idx, i, *label).clicked() {
                             let new_id = TEMPLATE_OPTIONS[i].0;
                             if new_id != self.settings.strip_template {
+                                let was_out_of_frame = self.is_out_of_frame();
                                 self.settings.strip_template = new_id.to_string();
                                 self.template = get_template_by_id(new_id).unwrap();
                                 self.sync_settings_from_ui();
+                                self.leave_out_of_frame_if_needed(was_out_of_frame);
+                                self.enter_out_of_frame_if_needed(was_out_of_frame);
                                 self.refill_from_folder(true);
-                                self.preview_dirty = true;
+                                if !self.is_out_of_frame() {
+                                    self.preview_dirty = true;
+                                }
                             }
                         }
                     }
@@ -1461,8 +1711,12 @@ impl CarouselApp {
                 .clicked()
             {
                 self.layout_seed = random_layout_seed();
-                self.preview_dirty = true;
-                self.status = format!("New layout seed: {}.", self.layout_seed);
+                if self.is_out_of_frame() {
+                    self.refill_from_folder(false);
+                } else {
+                    self.preview_dirty = true;
+                    self.status = format!("New layout seed: {}.", self.layout_seed);
+                }
             }
         });
 
@@ -1517,13 +1771,17 @@ impl CarouselApp {
             }
         }
 
-        let mut smart = self.settings.strip_smart_shuffle;
-        if ui
-            .checkbox(&mut smart, "Smart shuffle (match photo shape to slot)")
-            .changed()
-        {
-            self.settings.strip_smart_shuffle = smart;
-            self.sync_settings_from_ui();
+        if self.is_out_of_frame() {
+            ui.label("Smart shuffle: off (placer assigns roles).");
+        } else {
+            let mut smart = self.settings.strip_smart_shuffle;
+            if ui
+                .checkbox(&mut smart, "Smart shuffle (match photo shape to slot)")
+                .changed()
+            {
+                self.settings.strip_smart_shuffle = smart;
+                self.sync_settings_from_ui();
+            }
         }
 
         let mut repeats = self.settings.strip_allow_photo_repeats;
@@ -1538,23 +1796,27 @@ impl CarouselApp {
             self.sync_settings_from_ui();
         }
 
-        ui.label("Card edges");
-        let mut edge_idx = self.card_edge_index();
-        ui.add_enabled_ui(!self.layout_locked, |ui| {
-            egui::ComboBox::from_id_salt("card_edge")
-                .selected_text(CARD_EDGE_LABELS[edge_idx].0)
-                .show_ui(ui, |ui| {
-                    for (i, (label, val)) in CARD_EDGE_LABELS.iter().enumerate() {
-                        if ui.selectable_value(&mut edge_idx, i, *label).clicked() {
-                            self.settings.strip_card_edge = (*val).to_string();
-                            self.sync_settings_from_ui();
-                            self.preview_dirty = true;
+        if self.is_out_of_frame() {
+            ui.label("Card edges: borderless (this template).");
+        } else {
+            ui.label("Card edges");
+            let mut edge_idx = self.card_edge_index();
+            ui.add_enabled_ui(!self.layout_locked, |ui| {
+                egui::ComboBox::from_id_salt("card_edge")
+                    .selected_text(CARD_EDGE_LABELS[edge_idx].0)
+                    .show_ui(ui, |ui| {
+                        for (i, (label, val)) in CARD_EDGE_LABELS.iter().enumerate() {
+                            if ui.selectable_value(&mut edge_idx, i, *label).clicked() {
+                                self.settings.strip_card_edge = (*val).to_string();
+                                self.sync_settings_from_ui();
+                                self.preview_dirty = true;
+                            }
                         }
-                    }
-                });
-        });
-        if self.layout_locked {
-            ui.label("Unlock layout to change card edge mode.");
+                    });
+            });
+            if self.layout_locked {
+                ui.label("Unlock layout to change card edge mode.");
+            }
         }
 
         ui.horizontal(|ui| {
@@ -1586,7 +1848,14 @@ impl CarouselApp {
             let req = self.fill_required_bitmap();
             let n = self.effective_num_slots();
             (0..n)
-                .filter(|&i| req.get(i) == Some(&true) && self.slots.assignments[i].is_some())
+                .filter(|&i| {
+                    req.get(i) == Some(&true)
+                        && self
+                            .slots
+                            .assignments
+                            .get(i)
+                            .map_or(false, |s| s.is_some())
+                })
                 .count()
         };
         if self.source_paths.is_empty() {
@@ -1644,6 +1913,7 @@ impl eframe::App for CarouselApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.ensure_compositor(frame);
         self.poll_export();
+        self.poll_analysis(ctx);
         self.poll_preview(ctx);
         self.rebuild_preview(ctx);
 
@@ -1687,6 +1957,36 @@ impl eframe::App for CarouselApp {
     }
 }
 
+fn out_of_frame_lock_slots(
+    overlay: &[StripSlotDef],
+    placed: Option<&[StripSlotDef]>,
+) -> Vec<StripSlotDef> {
+    if overlay.is_empty() {
+        placed.map(|s| s.to_vec()).unwrap_or_default()
+    } else {
+        overlay.to_vec()
+    }
+}
+
+fn resolve_flagship_slot_index(
+    layout_snapshot: Option<&LayoutSnapshot>,
+    placed_slots: Option<&[StripSlotDef]>,
+    is_out_of_frame: bool,
+    template_flagship: Option<usize>,
+) -> Option<usize> {
+    if let Some(snap) = layout_snapshot {
+        if let Some(idx) = snap.flagship_slot_index {
+            return Some(idx);
+        }
+    }
+    if is_out_of_frame {
+        if let Some(placed) = placed_slots {
+            return flagship_slot_index(placed);
+        }
+    }
+    template_flagship
+}
+
 pub fn run_gui() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -1715,6 +2015,8 @@ pub fn run_gui() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use core::TEMPLATE_IDS;
     use super::*;
 
@@ -1723,5 +2025,65 @@ mod tests {
         for (id, _) in TEMPLATE_OPTIONS {
             assert!(TEMPLATE_IDS.contains(id));
         }
+    }
+
+    #[test]
+    fn out_of_frame_is_not_a_gui_template() {
+        assert!(
+            !TEMPLATE_OPTIONS
+                .iter()
+                .any(|(id, _)| *id == "strip_out_of_frame_v1"),
+            "out-of-frame is frozen; do not expose it in the GUI"
+        );
+    }
+
+    #[test]
+    fn out_of_frame_lock_slots_capture_has_cutouts() {
+        let tpl = get_template_by_id("strip_out_of_frame_v1").unwrap();
+        let overlay = vec![
+            StripSlotDef::new(100, 50, 1400, 1200).with_z(0),
+            StripSlotDef::new(400, 200, 600, 900)
+                .with_z(100)
+                .with_cutout()
+                .with_mask_path(PathBuf::from("masks/fig1.png")),
+        ];
+        let slots = out_of_frame_lock_slots(&overlay, None);
+        let snap = LayoutSnapshot::capture_resolved(
+            &tpl,
+            7,
+            "borderless",
+            slots,
+            vec![true, true],
+            flagship_slot_index(&overlay),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!snap.slots.is_empty());
+        assert!(snap.slots.iter().any(|s| s.cutout));
+        assert_eq!(snap.flagship_slot_index, Some(1));
+    }
+
+    #[test]
+    fn flagship_slot_index_prefers_snapshot_over_template() {
+        let tpl = get_template_by_id("strip_mural_v2").unwrap();
+        let template_hero = tpl.layout_flagship_slot_index.unwrap();
+        let snap = LayoutSnapshot::capture_resolved(
+            &tpl,
+            1,
+            "borderless",
+            Vec::new(),
+            Vec::new(),
+            Some(3),
+            Vec::new(),
+            Vec::new(),
+        );
+        let idx = resolve_flagship_slot_index(
+            Some(&snap),
+            None,
+            false,
+            tpl.layout_flagship_slot_index,
+        );
+        assert_eq!(idx, Some(3));
+        assert_ne!(idx, Some(template_hero));
     }
 }
