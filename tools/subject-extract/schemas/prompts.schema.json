@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://carousel-canvas.local/subject-extract/prompts.schema.json",
+  "title": "rembg sam_prompt file",
+  "type": "object",
+  "required": ["sam_prompt"],
+  "additionalProperties": false,
+  "properties": {
+    "sam_prompt": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/pointPrompt" },
+          { "$ref": "#/$defs/rectanglePrompt" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "pointPrompt": {
+      "type": "object",
+      "required": ["type", "data", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "point" },
+        "data": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "number" }
+        },
+        "label": { "type": "integer", "enum": [0, 1] }
+      }
+    },
+    "rectanglePrompt": {
+      "type": "object",
+      "required": ["type", "data", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "rectangle" },
+        "data": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "type": "number" }
+        },
+        "label": { "type": "integer", "enum": [0, 1] }
+      }
+    }
+  }
+}
