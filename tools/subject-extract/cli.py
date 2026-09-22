@@ -32,6 +32,7 @@ from compose_cmd import (  # noqa: E402
     run_seed,
     run_subtract,
     run_union,
+    run_wipe_islands,
     run_work_prep,
 )
 from doctor import run_doctor  # noqa: E402
@@ -178,6 +179,15 @@ def build_parser() -> argparse.ArgumentParser:
     erase_p.add_argument("cutout_png")
     erase_p.add_argument("out_png")
 
+    islands_p = sub.add_parser(
+        "wipe-islands",
+        help="Drop floating alpha blobs; keep people and bits within --link-px of them",
+    )
+    islands_p.add_argument("--min-person-frac", type=float, default=0.08)
+    islands_p.add_argument("--link-px", type=int, default=16)
+    islands_p.add_argument("cutout_png")
+    islands_p.add_argument("out_png")
+
     crop_rembg_p = sub.add_parser(
         "crop-rembg",
         help="Run rembg on a crop, paste into a full-res transparent canvas",
@@ -300,6 +310,13 @@ def _dispatch(args: argparse.Namespace) -> int:
         return run_clip_alpha(args.cutout_png, args.xyxy, args.out_png)
     if args.command in ("wipe", "erase-alpha"):
         return run_erase_alpha(args.cutout_png, args.xyxy, args.out_png)
+    if args.command == "wipe-islands":
+        return run_wipe_islands(
+            args.cutout_png,
+            args.out_png,
+            min_person_frac=args.min_person_frac,
+            link_px=args.link_px,
+        )
     if args.command == "crop-rembg":
         return run_crop_rembg(args.model, args.image, args.xyxy, args.out_png)
     if args.command == "alpha-close":

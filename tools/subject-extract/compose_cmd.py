@@ -141,6 +141,63 @@ def run_subtract(image_path: str, cutout_path: str, donor_path: str, out_path: s
     return code
 
 
+def run_wipe_islands(
+    cutout_path: str,
+    out_path: str,
+    min_person_frac: float = 0.08,
+    link_px: int = 16,
+) -> int:
+    """Keep person-sized blobs and bits within link_px of them; drop floating junk."""
+    img = _open_rgba(cutout_path)
+    if img is None:
+        return 1
+    arr = np.array(img)
+    opaque = arr[:, :, 3] > 8
+    if not bool(opaque.any()):
+        print("error: wipe-islands: empty alpha", file=sys.stderr)
+        return 1
+    n_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        opaque.astype(np.uint8),
+        connectivity=8,
+    )
+    areas = {i: int(stats[i, cv2.CC_STAT_AREA]) for i in range(1, n_labels)}
+    if not areas:
+        print("error: wipe-islands: no components", file=sys.stderr)
+        return 1
+    max_area = max(areas.values())
+    kept: set[int] = {
+        i for i, area in areas.items() if area >= min_person_frac * max_area
+    }
+    if not kept:
+        kept.add(max(areas, key=areas.get))
+    changed = True
+    while changed:
+        changed = False
+        kept_mask = np.isin(labels, list(kept)).astype(np.uint8)
+        dist = cv2.distanceTransform((1 - kept_mask), cv2.DIST_L2, 5)
+        for i, _area in areas.items():
+            if i in kept:
+                continue
+            ys, xs = np.where(labels == i)
+            if ys.size == 0:
+                continue
+            if float(dist[ys, xs].min()) <= link_px:
+                kept.add(i)
+                changed = True
+    keep_mask = np.isin(labels, list(kept))
+    removed = int(np.sum(opaque & ~keep_mask))
+    arr[:, :, 3] = np.where(keep_mask, arr[:, :, 3], np.uint8(0))
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(arr, mode="RGBA").save(out)
+    dropped = sorted(i for i in areas if i not in kept)
+    print(
+        f"wipe-islands kept {len(kept)} dropped {len(dropped)} "
+        f"removed {removed} px (min_person_frac={min_person_frac} link_px={link_px}) -> {out}"
+    )
+    return 0
+
+
 def run_erase_alpha(cutout_path: str, xyxy: str, out_path: str) -> int:
     box = parse_xyxy(xyxy)
     if box is None:
