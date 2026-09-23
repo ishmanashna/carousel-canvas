@@ -27,6 +27,8 @@ from compose_cmd import (  # noqa: E402
     run_crop_rembg,
     run_erase_alpha,
     run_grow_color,
+    run_lasso,
+    run_lasso_preview,
     run_lift_alpha,
     run_paste,
     run_seed,
@@ -179,6 +181,24 @@ def build_parser() -> argparse.ArgumentParser:
     erase_p.add_argument("cutout_png")
     erase_p.add_argument("out_png")
 
+    lasso_p = sub.add_parser(
+        "lasso",
+        help="Zero alpha inside a polygon. Quote --poly. RGB stays.",
+    )
+    lasso_p.add_argument("--poly", required=True, help='"x,y;x,y;x,y" at least 3 points')
+    lasso_p.add_argument("--origin", default=None, help='"x,y" added to every point (crop top-left)')
+    lasso_p.add_argument("cutout_png")
+    lasso_p.add_argument("out_png")
+
+    preview_p = sub.add_parser(
+        "lasso-preview",
+        help="Draw the polygon on a copy. Does not change the cutout.",
+    )
+    preview_p.add_argument("--poly", required=True, help='"x,y;x,y;x,y"')
+    preview_p.add_argument("--origin", default=None, help='"x,y" crop top-left')
+    preview_p.add_argument("image")
+    preview_p.add_argument("out_png")
+
     islands_p = sub.add_parser(
         "wipe-islands",
         help="Drop floating alpha blobs; keep people and bits within --link-px of them",
@@ -310,6 +330,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return run_clip_alpha(args.cutout_png, args.xyxy, args.out_png)
     if args.command in ("wipe", "erase-alpha"):
         return run_erase_alpha(args.cutout_png, args.xyxy, args.out_png)
+    if args.command == "lasso":
+        return run_lasso(args.cutout_png, args.poly, args.out_png, args.origin)
+    if args.command == "lasso-preview":
+        return run_lasso_preview(args.image, args.poly, args.out_png, args.origin)
     if args.command == "wipe-islands":
         return run_wipe_islands(
             args.cutout_png,

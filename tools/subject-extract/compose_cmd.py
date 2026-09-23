@@ -460,3 +460,81 @@ def run_paste(image_path: str, piece_path: str, xyxy: str, out_path: str) -> int
     if code == 0:
         print(f"paste {box_w}x{box_h} at {x1},{y1} -> {out_path}")
     return code
+
+
+def _parse_poly(raw: str) -> np.ndarray | None:
+    chunks = [c.strip() for c in raw.split(";") if c.strip()]
+    pts: list[list[int]] = []
+    for chunk in chunks:
+        parts = [p.strip() for p in chunk.split(",") if p.strip()]
+        if len(parts) != 2:
+            print("error: --poly points are x,y separated by semicolons", file=sys.stderr)
+            return None
+        try:
+            pts.append([int(float(parts[0])), int(float(parts[1]))])
+        except ValueError:
+            print("error: --poly values must be numbers", file=sys.stderr)
+            return None
+    if len(pts) < 3:
+        print("error: --poly needs at least 3 points", file=sys.stderr)
+        return None
+    return np.array(pts, dtype=np.int32)
+
+
+def _shift_poly(pts: np.ndarray, origin: str | None) -> np.ndarray | None:
+    if not origin:
+        return pts
+    point = parse_point(origin)
+    if point is None:
+        return None
+    ox, oy = point
+    return pts + np.array([ox, oy], dtype=np.int32)
+
+
+def run_lasso(cutout_path: str, poly: str, out_path: str, origin: str | None = None) -> int:
+    pts = _parse_poly(poly)
+    if pts is None:
+        return 1
+    pts = _shift_poly(pts, origin)
+    if pts is None:
+        return 1
+    img = _open_rgba(cutout_path)
+    if img is None:
+        return 1
+    arr = np.array(img)
+    mask = np.zeros(arr.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [pts], 255)
+    before = arr[:, :, 3] >= 128
+    removed = int(np.sum(before & (mask > 0)))
+    arr[:, :, 3] = np.where(mask > 0, 0, arr[:, :, 3])
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(arr, mode="RGBA").save(out)
+    print(f"lasso removed {removed} opaque pixels -> {out}")
+    return 0
+
+
+def run_lasso_preview(
+    image_path: str, poly: str, out_path: str, origin: str | None = None
+) -> int:
+    pts = _parse_poly(poly)
+    if pts is None:
+        return 1
+    pts = _shift_poly(pts, origin)
+    if pts is None:
+        return 1
+    img = _open_rgba(image_path)
+    if img is None:
+        return 1
+    bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+    overlay = bgr.copy()
+    cv2.fillPoly(overlay, [pts], (0, 0, 255))
+    painted = cv2.addWeighted(overlay, 0.35, bgr, 0.65, 0)
+    cv2.polylines(painted, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(out), painted):
+        print(f"error: could not write {out}", file=sys.stderr)
+        return 1
+    print(f"lasso-preview {len(pts)} points -> {out}")
+    return 0

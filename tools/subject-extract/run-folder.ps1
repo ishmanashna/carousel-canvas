@@ -12,7 +12,10 @@ param(
     [string[]]$Include = @(),
     [ValidateRange(1, 12)]
     [int]$Seats = 2,
-    [string]$DoneCutoutsDir = ""
+    [string]$DoneCutoutsDir = "",
+    [string]$TriageLog = "",
+    [string]$OnlyPile = "",
+    [switch]$IgnoreDoneCutouts
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,8 +62,12 @@ $script:FinishedCount = 0
 $script:SkippedCount = 0
 
 function Test-CutoutDone([string]$stem) {
+    $here = Join-Path (Join-Path $outRoot $stem) $script:CutoutName
+    if ($IgnoreDoneCutouts) {
+        return (Test-Path -LiteralPath $here)
+    }
     foreach ($p in @(
-        (Join-Path (Join-Path $outRoot $stem) $script:CutoutName),
+        $here,
         (Join-Path (Join-Path $DoneCutoutsDir $stem) $script:CutoutName)
     )) {
         if (Test-Path -LiteralPath $p) { return $true }
@@ -96,6 +103,29 @@ if ($Include.Count -gt 0) {
     $images = $ordered
 }
 
+$script:TriageByStem = @{}
+if ($TriageLog) {
+    if (-not (Test-Path -LiteralPath $TriageLog)) {
+        Write-Error "triage log missing: $TriageLog"
+        exit 2
+    }
+    foreach ($line in Get-Content -LiteralPath $TriageLog) {
+        if (-not $line.Trim()) { continue }
+        try {
+            $row = $line | ConvertFrom-Json
+            if ($row.stem) { $script:TriageByStem[[string]$row.stem] = $row }
+        }
+        catch { }
+    }
+}
+if ($OnlyPile) {
+    $want = $OnlyPile.ToLowerInvariant()
+    $images = @($images | Where-Object {
+        $stem = $_.BaseName
+        $script:TriageByStem.ContainsKey($stem) -and ([string]$script:TriageByStem[$stem].pile).ToLowerInvariant() -eq $want
+    })
+}
+
 Write-Output ("folder run {0} images -> {1} (seats={2})" -f $images.Count, $outRoot, $Seats)
 Write-Output ("skip-if-present also checks: {0}" -f $DoneCutoutsDir)
 $script:TotalImages = $images.Count
@@ -116,8 +146,17 @@ function New-AgentLauncher([System.IO.FileInfo]$img, [string]$dest) {
 - wall_clock_seconds:
 "@ | Set-Content -LiteralPath (Join-Path $dest "TIMING.md") -Encoding UTF8
 
+    $stemNote = $img.BaseName
+    $brief = ""
+    if ($script:TriageByStem.ContainsKey($stemNote)) {
+        $n = $script:TriageByStem[$stemNote]
+        $brief = @"
+
+This is a from-scratch second cutout of the same original. Do not copy the previous alpha. Do not wipe. Triage for this photo: problem=$($n.problem) why=$($n.why) keep=$($n.keep) missing=$($n.missing) next=$($n.next) leftover_do_not_rebuild=$($n.leftover)
+"@
+    }
     $prompt = @"
-Work in $RepoRoot. Follow docs\subject-extract\03.1.md exactly (including Final checker pass). Input: $relIn Out: $relOut TIMING.md start is already stamped. Set `$env:SX_ACTS_LOG to $relOut\ACTS.jsonl before any sx call. Always write REPORT.md. Always wipe-islands before lift-alpha. Do not mark BLOCKED because rembg was empty. sx rembg already retries. If it still fails, wait 3 minutes and run sx rembg again until you have a seed. Isolated / detached hand fragments are junk - wipe them. Cleanup is light (~10-20%): only remove obvious spare floaters that do not touch the subject. Never wipe into face, hands, attached hair, or held instruments. If unsure, leave it. After the seed: at most 3 wipes and 2 tight sam-box fixes. Prefer WORKS when usable for a carousel; PARTIAL only if the subject is clearly damaged or major held kit is missing. Do not chase perfection. SAM only on missing subject bits with a tight box. Copy numbers into TIMING.md from ACTS.jsonl. PowerShell: use semicolon, not double-ampersand. Quote xyxy box values. Do not use the GUI, strip export, or git commit.
+Work in $RepoRoot. Follow docs\subject-extract\03.1.md exactly. Input: $relIn Out: $relOut TIMING.md start is already stamped. Set `$env:SX_ACTS_LOG to $relOut\ACTS.jsonl before any sx call. Always write REPORT.md. Do not wipe, do not wipe-islands, do not erase-alpha. After the rembg seed, only tight sam-box for missing subject bits (clip + union), then lift-alpha. Leftover specks and extra background stay. Do not mark BLOCKED because rembg was empty. sx rembg already retries. If it still fails, wait 3 minutes and run sx rembg again until you have a seed. Prefer WORKS when usable for a carousel; PARTIAL only if the subject is clearly damaged or major held kit is missing. Do not chase perfection. Copy numbers into TIMING.md from ACTS.jsonl. PowerShell: use semicolon, not double-ampersand. Quote xyxy box values. Do not use the GUI, strip export, or git commit.$brief
 "@
     $promptFile = Join-Path $dest "AGENT_PROMPT.txt"
     $launcher = Join-Path $dest "run-agent.ps1"
@@ -125,10 +164,11 @@ Work in $RepoRoot. Follow docs\subject-extract\03.1.md exactly (including Final 
     $agentLit = $agent.Replace("'", "''")
     $rootLit = $RepoRoot.Replace("'", "''")
     $promptLit = $promptFile.Replace("'", "''")
+    $inLit = $inPath.Path.Replace("'", "''")
     @"
 Set-Location -LiteralPath '$rootLit'
 `$prompt = Get-Content -LiteralPath '$promptLit' -Raw
-& '$agentLit' -p --trust --force --workspace '$rootLit' --model $Model -- `$prompt
+& '$agentLit' -p --trust --force --workspace '$rootLit' --add-dir '$inLit' --model $Model -- `$prompt
 exit `$LASTEXITCODE
 "@ | Set-Content -LiteralPath $launcher -Encoding UTF8
     return $launcher
@@ -175,6 +215,15 @@ function Complete-PhotoJob($job, [string]$forcedStatus) {
     }
     if (Test-Path -LiteralPath $job.Done) {
         Copy-Item -LiteralPath $job.Done -Destination (Join-Path $compare "$($job.Stem).png") -Force
+    }
+    else {
+        foreach ($fallback in @("cutout.png", "best.png")) {
+            $src = Join-Path $job.Dest $fallback
+            if (Test-Path -LiteralPath $src) {
+                Copy-Item -LiteralPath $src -Destination (Join-Path $compare "$($job.Stem).png") -Force
+                break
+            }
+        }
     }
     $seconds = [int]((Get-Date) - $job.Start).TotalSeconds
     $script:FinishedCount++
@@ -230,22 +279,7 @@ Per-image timeout ($TimeoutSeconds s). Folder run continued.
     }
 }
 
-for ($round = 1; $round -le 2; $round++) {
-    Write-Output ("folder round {0}" -f $round)
-    $batch = $images
-    if ($round -gt 1) {
-        $batch = @($images | Where-Object {
-            $id = $_.BaseName -replace '-Enhanced-NR-Edit$', ''
-            $cut = Join-Path $outRoot $id
-            $cut = Join-Path $cut "cutout_full.png"
-            -not (Test-Path -LiteralPath $cut)
-        })
-        if ($batch.Count -eq 0) { break }
-        Write-Output ("retry {0} photos with no cutout after 120s GPU rest" -f $batch.Count)
-        Start-Sleep -Seconds 120
-    }
-    Invoke-PhotoBatch $batch
-}
+Invoke-PhotoBatch $images
 
 $summarize = Join-Path $PSScriptRoot "summarize-run.ps1"
 if (Test-Path -LiteralPath $summarize) {
